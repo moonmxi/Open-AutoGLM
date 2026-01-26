@@ -559,7 +559,19 @@ def main():
         seq = extract_repro_sequence_from_finish_message(result)
         if seq is not None:
             print("\nDetected <LEAK_SEQUENCE_READY> with JSON payload.")
-            print("You can replay it via PhoneAgent.execute_repro_sequence(seq, repeat_count=...).")
+            repeat_env = os.getenv("PHONE_AGENT_REPLAY_COUNT", "3")
+            try:
+                repeat_count = max(1, int(repeat_env))
+            except ValueError:
+                repeat_count = 3
+
+            try:
+                replay_msgs = agent.execute_repro_sequence(seq, repeat_count=repeat_count, inter_step_wait_s=0.6)
+                print(f"\nReplayed sequence repeat_count={repeat_count}:")
+                for msg in replay_msgs:
+                    print(f"  - {msg}")
+            except Exception as e:
+                print(f"\nReplay failed: {e}")
         return
 
     # Run with provided task or enter interactive mode

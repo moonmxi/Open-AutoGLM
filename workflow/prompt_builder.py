@@ -65,8 +65,8 @@ def build_leak_case_task_hint(case: LeakCase) -> str:
         app_line
         + "三阶段要求：\n"
         + "1) 用实时截图对齐到 pre_leak 目标界面（参考目标前两张截图+pre_leak，必要时 Home->Launch）。\n"
-        + "2) 只在目标界面内按 Actions Window / Replay Hints 复现压力动作并验证。\n"
-        + "3) 动作序列可重复后，用 <LEAK_SEQUENCE_READY> + ```json``` finish，JSON 至少包含 case_id / leak_ts_ms / steps，steps 里不要包含 Launch。\n"
+        + "2) 在目标界面内按 Actions Window / Replay Hints 复现压力动作（首轮），完成后先回到首轮开始的场景。\n"
+        + "3) 自测：按自己构造的同一序列再执行一轮，确认无误后，用 <LEAK_SEQUENCE_READY> + ```json``` finish；JSON 至少含 case_id / leak_ts_ms / steps，steps 不含 Launch，执行完必须回到序列开始场景。\n"
     )
 
 
