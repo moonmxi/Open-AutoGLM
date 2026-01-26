@@ -13,6 +13,49 @@ from phone_agent.config.timing import TIMING_CONFIG
 # Global flag to control HDC command output
 _HDC_VERBOSE = os.getenv("HDC_VERBOSE", "false").lower() in ("true", "1", "yes")
 
+# Some HarmonyOS HDC builds require `-t <device>` even when only one device is connected.
+# We auto-inject a target for device-scoped commands to avoid "need connect-key" failures.
+_AUTO_HDC_TARGET: str | None = None
+
+
+def _get_auto_hdc_target(*, timeout: int = 5) -> str | None:
+    global _AUTO_HDC_TARGET
+    if _AUTO_HDC_TARGET is not None:
+        return _AUTO_HDC_TARGET
+    try:
+        result = subprocess.run(
+            ["hdc", "list", "targets"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        lines = (result.stdout or "").splitlines()
+        candidates = [l.strip() for l in lines if l.strip()]
+        _AUTO_HDC_TARGET = candidates[0] if candidates else None
+    except Exception:
+        _AUTO_HDC_TARGET = None
+    return _AUTO_HDC_TARGET
+
+
+def _maybe_inject_target(cmd: list) -> list:
+    if not cmd or cmd[0] != "hdc":
+        return cmd
+    if "-t" in cmd:
+        return cmd
+    if len(cmd) < 2:
+        return cmd
+
+    # Only auto-inject for commands that operate on a specific device.
+    # Keep global commands untouched (list, version, connect/disconnect, etc.).
+    device_scoped = {"shell", "file", "install", "uninstall", "fport", "forward", "rport"}
+    if cmd[1] not in device_scoped:
+        return cmd
+
+    target = _get_auto_hdc_target()
+    if not target:
+        return cmd
+    return [cmd[0], "-t", target, *cmd[1:]]
+
 
 def _run_hdc_command(cmd: list, **kwargs) -> subprocess.CompletedProcess:
     """
@@ -25,6 +68,7 @@ def _run_hdc_command(cmd: list, **kwargs) -> subprocess.CompletedProcess:
     Returns:
         CompletedProcess result.
     """
+    cmd = _maybe_inject_target(list(cmd))
     if _HDC_VERBOSE:
         print(f"[HDC] Running command: {' '.join(cmd)}")
 

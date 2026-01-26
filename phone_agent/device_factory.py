@@ -47,6 +47,12 @@ class DeviceFactory:
         """Get current app name."""
         return self.module.get_current_app(device_id)
 
+    def get_display_size(self, device_id: str | None = None) -> tuple[int, int] | None:
+        """Get physical display size (width, height)."""
+        if hasattr(self.module, "get_display_size"):
+            return self.module.get_display_size(device_id)
+        return None
+
     def tap(
         self, x: int, y: int, device_id: str | None = None, delay: float | None = None
     ):

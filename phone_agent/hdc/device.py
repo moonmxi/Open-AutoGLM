@@ -12,6 +12,61 @@ import re
 
 # Store last tap per device to support inputText fallback
 _LAST_TAP: dict[str | None, tuple[int, int]] = {}
+_AUTO_DEVICE_ID: str | None = None
+_DISPLAY_SIZE: dict[str | None, tuple[int, int]] = {}
+
+
+def get_display_size(device_id: str | None = None) -> tuple[int, int] | None:
+    """
+    Get the physical display size (width, height) in pixels.
+
+    Falls back to None if the query fails.
+    """
+    if device_id in _DISPLAY_SIZE:
+        return _DISPLAY_SIZE[device_id]
+
+    hdc_prefix = _get_hdc_prefix(device_id)
+    try:
+        # HarmonyOS supports `wm size`
+        result = _run_hdc_command(
+            hdc_prefix + ["shell", "wm", "size"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        out = (result.stdout or "") + (result.stderr or "")
+        for line in out.splitlines():
+            line = line.strip()
+            if "Physical size" in line:
+                # Example: Physical size: 1080x2400
+                parts = line.split(":")
+                if len(parts) >= 2:
+                    size_part = parts[1].strip()
+                    if "x" in size_part:
+                        w_str, h_str = size_part.split("x", 1)
+                        w, h = int(w_str), int(h_str)
+                        _DISPLAY_SIZE[device_id] = (w, h)
+                        return (w, h)
+    except Exception:
+        pass
+
+    try:
+        from phone_agent.hdc.screenshot import get_screenshot
+
+        shot = get_screenshot(device_id)
+        if (
+            shot
+            and shot.width
+            and shot.height
+            and not getattr(shot, "is_sensitive", False)
+            and not (shot.mean_luma == 0 and shot.std_luma == 0)
+        ):
+            _DISPLAY_SIZE[device_id] = (shot.width, shot.height)
+            return (shot.width, shot.height)
+    except Exception:
+        pass
+
+    return None
 
 
 def get_last_tap(device_id: str | None = None) -> tuple[int, int] | None:
@@ -313,6 +368,19 @@ def _get_hdc_prefix(device_id: str | None) -> list:
     """Get HDC command prefix with optional device specifier."""
     if device_id:
         return ["hdc", "-t", device_id]
+    global _AUTO_DEVICE_ID
+    if _AUTO_DEVICE_ID is None:
+        try:
+            result = _run_hdc_command(
+                ["hdc", "list", "targets"], capture_output=True, text=True, timeout=5
+            )
+            lines = (result.stdout or "").strip().splitlines()
+            candidates = [l.strip() for l in lines if l.strip()]
+            _AUTO_DEVICE_ID = candidates[0] if candidates else None
+        except Exception:
+            _AUTO_DEVICE_ID = None
+    if _AUTO_DEVICE_ID:
+        return ["hdc", "-t", _AUTO_DEVICE_ID]
     return ["hdc"]
 
 if __name__ == "__main__":

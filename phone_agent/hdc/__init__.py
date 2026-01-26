@@ -17,6 +17,7 @@ from phone_agent.hdc.device import (
     long_press,
     swipe,
     tap,
+    get_display_size,
 )
 from phone_agent.hdc.input import (
     clear_text,
@@ -50,4 +51,5 @@ __all__ = [
     "quick_connect",
     "list_devices",
     "set_hdc_verbose",
+    "get_display_size",
 ]

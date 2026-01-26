@@ -50,7 +50,7 @@ SYSTEM_PROMPT = (
 - do(action="Wait", duration="x seconds")  
     等待页面加载，x为需要等待多少秒。
 - finish(message="xxx")  
-    finish是结束任务的操作，表示准确完整完成任务，message是终止信息。 
+    finish是结束任务的操作，表示准确完整完成任务，message是终止信息；也可以使用单引号：finish(message='xxx')。当 message 需要包含 JSON 等带双引号的内容时，请优先使用单引号包裹 message。 
 
 动作序列必须严格遵循以下规则：
 只有最后确定压力测试序列之后才能够输出多动作序列，且多动作序列中间不能有任何多余的文本说明，依旧必须严格按照<think>{think}</think> <answer>{action}</answer>格式输出，此时{action}内包含多个上述的单个行为。

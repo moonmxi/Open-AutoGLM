@@ -1,9 +1,15 @@
 """Main PhoneAgent class for orchestrating phone automation."""
 
+import base64
 import json
+import math
+import time
 import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
+
+import io
+from collections import deque
 
 from phone_agent.actions import ActionHandler
 from phone_agent.actions.handler import finish, parse_action
@@ -22,6 +28,9 @@ class AgentConfig:
     lang: str = "cn"
     system_prompt: str | None = None
     verbose: bool = True
+    screen_info_hook: Callable[[str, str], dict[str, Any]] | None = None
+    same_screen_threshold: float = 0.98
+    max_same_screen_steps: int = 10
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -80,22 +89,37 @@ class PhoneAgent:
 
         self._context: list[dict[str, Any]] = []
         self._step_count = 0
+        self._prev_screen_hash: int | None = None
+        self._same_screen_streak = 0
+        self._recent_screen_hashes: deque[int] = deque(maxlen=12)
+        self._last_action_signature: str | None = None
+        self._repeat_action_streak = 0
+        self._last_action_result: dict[str, Any] | None = None
+        self._reference_images_stripped = False
 
-    def run(self, task: str) -> str:
+    def run(self, task: str, *, extra_messages: list[dict[str, Any]] | None = None) -> str:
         """
         Run the agent to complete a task.
 
         Args:
             task: Natural language description of the task.
+            extra_messages: Optional messages to inject before the first live observation.
 
         Returns:
             Final message from the agent.
         """
         self._context = []
         self._step_count = 0
+        self._prev_screen_hash = None
+        self._same_screen_streak = 0
+        self._recent_screen_hashes.clear()
+        self._last_action_signature = None
+        self._repeat_action_streak = 0
+        self._last_action_result = None
+        self._reference_images_stripped = False
 
         # First step with user prompt
-        result = self._execute_step(task, is_first=True)
+        result = self._execute_step(task, is_first=True, extra_messages=extra_messages)
 
         if result.finished:
             return result.message or "Task completed"
@@ -109,7 +133,12 @@ class PhoneAgent:
 
         return "Max steps reached"
 
-    def step(self, task: str | None = None) -> StepResult:
+    def step(
+        self,
+        task: str | None = None,
+        *,
+        extra_messages: list[dict[str, Any]] | None = None,
+    ) -> StepResult:
         """
         Execute a single step of the agent.
 
@@ -126,15 +155,51 @@ class PhoneAgent:
         if is_first and not task:
             raise ValueError("Task is required for the first step")
 
-        return self._execute_step(task, is_first)
+        return self._execute_step(task, is_first, extra_messages=extra_messages)
 
     def reset(self) -> None:
         """Reset the agent state for a new task."""
         self._context = []
         self._step_count = 0
+        self._prev_screen_hash = None
+        self._same_screen_streak = 0
+        self._recent_screen_hashes.clear()
+        self._last_action_signature = None
+        self._repeat_action_streak = 0
+        self._last_action_result = None
+        self._reference_images_stripped = False
+
+    @staticmethod
+    def _dhash_from_base64(image_base64: str, hash_size: int = 8) -> int | None:
+        try:
+            from PIL import Image
+
+            raw = base64.b64decode(image_base64)
+            img = Image.open(io.BytesIO(raw)).convert("L")
+            img = img.resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
+            pixels = list(img.getdata())
+            result = 0
+            for row in range(hash_size):
+                row_start = row * (hash_size + 1)
+                for col in range(hash_size):
+                    left = pixels[row_start + col]
+                    right = pixels[row_start + col + 1]
+                    bit = 1 if left > right else 0
+                    result = (result << 1) | bit
+            return result
+        except Exception:
+            return None
+
+    @staticmethod
+    def _hash_similarity(a: int, b: int, bits: int = 64) -> float:
+        dist = (a ^ b).bit_count()
+        return 1.0 - (dist / bits)
 
     def _execute_step(
-        self, user_prompt: str | None = None, is_first: bool = False
+        self,
+        user_prompt: str | None = None,
+        is_first: bool = False,
+        extra_messages: list[dict[str, Any]] | None = None,
     ) -> StepResult:
         """Execute a single step of the agent loop."""
         self._step_count += 1
@@ -144,27 +209,130 @@ class PhoneAgent:
         screenshot = device_factory.get_screenshot(self.agent_config.device_id)
         current_app = device_factory.get_current_app(self.agent_config.device_id)
 
+        # Simple loop guard: detect repeated same-screen + repeated action patterns.
+        current_hash = None
+        # Treat sensitive/black-like frames as unusable for hash-based loop detection.
+        if not getattr(screenshot, "is_sensitive", False):
+            current_hash = self._dhash_from_base64(screenshot.base64_data)
+        screen_similarity_to_prev: float | None = None
+        if current_hash is not None and self._prev_screen_hash is not None:
+            screen_similarity_to_prev = self._hash_similarity(
+                current_hash, self._prev_screen_hash
+            )
+            if screen_similarity_to_prev >= self.agent_config.same_screen_threshold:
+                self._same_screen_streak += 1
+            else:
+                self._same_screen_streak = 0
+        else:
+            self._same_screen_streak = 0
+
+        self._prev_screen_hash = current_hash
+        if current_hash is not None:
+            self._recent_screen_hashes.append(current_hash)
+
+        def _is_two_state_cycle() -> bool:
+            if len(self._recent_screen_hashes) < 6:
+                return False
+            a = self._recent_screen_hashes[-1]
+            b = self._recent_screen_hashes[-2]
+            if a == b:
+                return False
+            tail = list(self._recent_screen_hashes)[-6:]
+            return tail == [a, b, a, b, a, b] or tail == [b, a, b, a, b, a]
+
+        def _is_three_state_cycle() -> bool:
+            if len(self._recent_screen_hashes) < 9:
+                return False
+            tail = list(self._recent_screen_hashes)[-9:]
+            a, b, c = tail[-3], tail[-2], tail[-1]
+            if len({a, b, c}) != 3:
+                return False
+            return tail == [a, b, c, a, b, c, a, b, c]
+
+        if (
+            (self._same_screen_streak >= self.agent_config.max_same_screen_steps and self._repeat_action_streak >= 2)
+            or _is_two_state_cycle()
+            or _is_three_state_cycle()
+        ):
+            message = (
+                "Loop detected: the agent is not making progress (same-screen repeat or screen cycle). "
+                "Likely causes: target screen mismatch, imprecise coordinates, or navigation bouncing. "
+                "Try: lower reliance on coordinates (use UI cues), add a deterministic reset (Home->Launch), or reduce the action window."
+            )
+            return StepResult(
+                success=False,
+                finished=True,
+                action=finish(message=message),
+                thinking="",
+                message=message,
+            )
+
+        extra_screen_info: dict[str, Any] = {}
+        if self.agent_config.screen_info_hook is not None:
+            try:
+                extra_screen_info = self.agent_config.screen_info_hook(
+                    current_app, screenshot.base64_data
+                )
+            except Exception:
+                extra_screen_info = {}
+
+        if self._last_action_result is not None:
+            # If the last action produced no visible change, hint the model to adjust.
+            if (
+                screen_similarity_to_prev is not None
+                and self._last_action_result.get("action", {}).get("_metadata") == "do"
+                and self._last_action_result.get("action", {}).get("action") not in ("Wait",)
+                and screen_similarity_to_prev >= self.agent_config.same_screen_threshold
+            ):
+                self._last_action_result = {
+                    **self._last_action_result,
+                    "success": False,
+                    "message": "Last action produced no visible change (same screen).",
+                }
+
+            extra_screen_info = {
+                **extra_screen_info,
+                "last_action": self._last_action_result.get("action"),
+                "last_action_ok": self._last_action_result.get("success"),
+                "last_action_message": self._last_action_result.get("message"),
+            }
+
+        extra_screen_info = {
+            **extra_screen_info,
+            "screen_similarity_to_prev": screen_similarity_to_prev,
+            "same_screen_streak": self._same_screen_streak,
+            "screenshot_is_sensitive": getattr(screenshot, "is_sensitive", False),
+            "screenshot_mean_luma": getattr(screenshot, "mean_luma", None),
+            "screenshot_std_luma": getattr(screenshot, "std_luma", None),
+            "screenshot_hash": current_hash,
+        }
+        if self._same_screen_streak >= 3:
+            extra_screen_info["progress_hint"] = "Same screen repeated; change strategy (reset/back/home/launch or try different path)."
+
         # Build messages
         if is_first:
             self._context.append(
                 MessageBuilder.create_system_message(self.agent_config.system_prompt)
             )
 
-            screen_info = MessageBuilder.build_screen_info(current_app)
+            if extra_messages:
+                self._context.extend(extra_messages)
+
+            screen_info = MessageBuilder.build_screen_info(current_app, **extra_screen_info)
             text_content = f"{user_prompt}\n\n{screen_info}"
 
             self._context.append(
                 MessageBuilder.create_user_message(
-                    text=text_content, image_base64=screenshot.base64_data
+                    text=text_content, image_base64=screenshot.base64_data, image_mime="image/jpeg"
                 )
             )
         else:
-            screen_info = MessageBuilder.build_screen_info(current_app)
+            screen_info = MessageBuilder.build_screen_info(current_app, **extra_screen_info)
             text_content = f"** Screen Info **\n\n{screen_info}"
 
             self._context.append(
                 MessageBuilder.create_user_message(
-                    text=text_content, image_base64=screenshot.base64_data
+                    text=text_content, image_base64=screenshot.base64_data, image_mime="image/jpeg"
                 )
             )
 
@@ -172,7 +340,7 @@ class PhoneAgent:
         try:
             msgs = get_messages(self.agent_config.lang)
             print("\n" + "=" * 50)
-            print(f"💭 {msgs['thinking']}:")
+            print(f"{msgs['thinking']}:")
             print("-" * 50)
             response = self.model_client.request(self._context)
         except Exception as e:
@@ -194,14 +362,22 @@ class PhoneAgent:
                 traceback.print_exc()
             action = finish(message=response.action)
 
+        action_signature = json.dumps(action, sort_keys=True, ensure_ascii=False)
+        if action_signature == self._last_action_signature:
+            self._repeat_action_streak += 1
+        else:
+            self._repeat_action_streak = 0
+        self._last_action_signature = action_signature
+
         if self.agent_config.verbose:
             # Print thinking process
             print("-" * 50)
-            print(f"🎯 {msgs['action']}:")
+            print(f"{msgs['action']}:")
             print(json.dumps(action, ensure_ascii=False, indent=2))
             print("=" * 50 + "\n")
 
-        # Remove image from context to save space
+        # Remove the live screen image from context to save space.
+        # Keep any injected reference images (e.g., leak case pre/post screenshots) for anchoring.
         self._context[-1] = MessageBuilder.remove_images_from_message(self._context[-1])
 
         # Execute action
@@ -216,6 +392,15 @@ class PhoneAgent:
                 finish(message=str(e)), screenshot.width, screenshot.height
             )
 
+        # Keep reference screenshots in context for the whole run (scene alignment is the core of leak mode).
+
+        self._last_action_result = {
+            "action": action,
+            "success": result.success,
+            "message": result.message,
+            "should_finish": result.should_finish,
+        }
+
         # Add assistant response to context
         self._context.append(
             MessageBuilder.create_assistant_message(
@@ -228,9 +413,9 @@ class PhoneAgent:
 
         if finished and self.agent_config.verbose:
             msgs = get_messages(self.agent_config.lang)
-            print("\n" + "🎉 " + "=" * 48)
+            print("\n" + "=" * 50)
             print(
-                f"✅ {msgs['task_completed']}: {result.message or action.get('message', msgs['done'])}"
+                f"{msgs['task_completed']}: {result.message or action.get('message', msgs['done'])}"
             )
             print("=" * 50 + "\n")
 
@@ -251,3 +436,113 @@ class PhoneAgent:
     def step_count(self) -> int:
         """Get the current step count."""
         return self._step_count
+
+    def execute_do_sequence(
+        self,
+        do_steps: list[str],
+        *,
+        repeat_count: int = 1,
+        inter_step_wait_s: float = 0.5,
+    ) -> list[str]:
+        """
+        Execute a list of `do(...)` steps (as strings) on the connected device.
+
+        This is intended for workflow controllers that want to replay a verified reproduction sequence
+        without invoking the model.
+
+        Returns:
+            A list of per-run status messages.
+        """
+        if repeat_count < 1:
+            raise ValueError("repeat_count must be >= 1")
+        if not do_steps:
+            raise ValueError("do_steps must not be empty")
+
+        device_factory = get_device_factory()
+        run_messages: list[str] = []
+
+        for run_idx in range(repeat_count):
+            for step_idx, step in enumerate(do_steps):
+                action = parse_action(step)
+                screenshot = device_factory.get_screenshot(self.agent_config.device_id)
+                result = self.action_handler.execute(
+                    action, screenshot.width, screenshot.height
+                )
+                if result.should_finish:
+                    run_messages.append(
+                        f"run={run_idx} finished early at step={step_idx}: {result.message or ''}"
+                    )
+                    break
+                if not result.success:
+                    run_messages.append(
+                        f"run={run_idx} failed at step={step_idx}: {result.message or ''}"
+                    )
+                    break
+                if inter_step_wait_s > 0:
+                    time.sleep(inter_step_wait_s)
+            else:
+                run_messages.append(f"run={run_idx} ok")
+
+        return run_messages
+
+    def execute_repro_sequence(
+        self,
+        repro_sequence: dict[str, Any],
+        *,
+        repeat_count: int = 1,
+        inter_step_wait_s: float = 0.5,
+    ) -> list[str]:
+        """
+        Execute a `repro_sequence.json` payload produced by the agent finish(message=...).
+
+        Expected minimal schema:
+            { "steps": [ { "action": "Back" }, { "action": "Tap", "element": [x,y] }, ... ] }
+        Backward compatible:
+            { "steps": [ { "do": "do(action=...)" }, ... ] }
+        """
+        steps = repro_sequence.get("steps")
+        if not isinstance(steps, list):
+            raise ValueError("repro_sequence.steps must be a list")
+
+        # New schema: structured action dicts
+        if steps and isinstance(steps[0], dict) and "action" in steps[0]:
+            device_factory = get_device_factory()
+            run_messages: list[str] = []
+
+            for run_idx in range(repeat_count):
+                for step_idx, item in enumerate(steps):
+                    if not isinstance(item, dict) or "action" not in item:
+                        raise ValueError(
+                            f"repro_sequence.steps[{step_idx}] must be an object with an 'action' field"
+                        )
+                    action = {"_metadata": "do", **item}
+                    screenshot = device_factory.get_screenshot(self.agent_config.device_id)
+                    result = self.action_handler.execute(
+                        action, screenshot.width, screenshot.height
+                    )
+                    if result.should_finish:
+                        run_messages.append(
+                            f"run={run_idx} finished early at step={step_idx}: {result.message or ''}"
+                        )
+                        break
+                    if not result.success:
+                        run_messages.append(
+                            f"run={run_idx} failed at step={step_idx}: {result.message or ''}"
+                        )
+                        break
+                    if inter_step_wait_s > 0:
+                        time.sleep(inter_step_wait_s)
+                else:
+                    run_messages.append(f"run={run_idx} ok")
+
+            return run_messages
+
+        # Old schema: do(...) strings
+        do_steps: list[str] = []
+        for i, item in enumerate(steps):
+            if not isinstance(item, dict) or "do" not in item:
+                raise ValueError(
+                    f"repro_sequence.steps[{i}] must be an object with an 'action' or 'do' field"
+                )
+            do_steps.append(str(item["do"]))
+        return self.execute_do_sequence(do_steps, repeat_count=repeat_count, inter_step_wait_s=inter_step_wait_s)

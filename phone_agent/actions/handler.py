@@ -80,8 +80,18 @@ class ActionHandler:
                 message=f"Unknown action: {action_name}",
             )
 
+        # Prefer physical display size (wm size) to map relative coords accurately.
         try:
-            return handler_method(action, screen_width, screen_height)
+            device_factory = get_device_factory()
+            display_size = device_factory.get_display_size(self.device_id)
+        except Exception:
+            display_size = None
+        display_width, display_height = (
+            display_size if display_size else (screen_width, screen_height)
+        )
+
+        try:
+            return handler_method(action, screen_width, screen_height, display_width, display_height)
         except Exception as e:
             return ActionResult(
                 success=False, should_finish=False, message=f"Action failed: {e}"
@@ -108,14 +118,14 @@ class ActionHandler:
         return handlers.get(action_name)
 
     def _convert_relative_to_absolute(
-        self, element: list[int], screen_width: int, screen_height: int
+        self, element: list[int], display_width: int, display_height: int
     ) -> tuple[int, int]:
         """Convert relative coordinates (0-1000) to absolute pixels."""
-        x = int(element[0] / 1000 * screen_width)
-        y = int(element[1] / 1000 * screen_height)
+        x = int(element[0] / 1000 * display_width)
+        y = int(element[1] / 1000 * display_height)
         return x, y
 
-    def _handle_launch(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_launch(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle app launch action."""
         app_name = action.get("app")
         if not app_name:
@@ -127,13 +137,13 @@ class ActionHandler:
             return ActionResult(True, False)
         return ActionResult(False, False, f"App not found: {app_name}")
 
-    def _handle_tap(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_tap(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle tap action."""
         element = action.get("element")
         if not element:
             return ActionResult(False, False, "No element coordinates")
 
-        x, y = self._convert_relative_to_absolute(element, width, height)
+        x, y = self._convert_relative_to_absolute(element, display_width, display_height)
 
         # Check for sensitive operation
         if "message" in action:
@@ -148,7 +158,7 @@ class ActionHandler:
         device_factory.tap(x, y, self.device_id)
         return ActionResult(True, False)
 
-    def _handle_type(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_type(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle text input action."""
         text = action.get("text", "")
 
@@ -172,7 +182,7 @@ class ActionHandler:
 
         return ActionResult(True, False)
 
-    def _handle_swipe(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_swipe(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle swipe action."""
         start = action.get("start")
         end = action.get("end")
@@ -180,48 +190,48 @@ class ActionHandler:
         if not start or not end:
             return ActionResult(False, False, "Missing swipe coordinates")
 
-        start_x, start_y = self._convert_relative_to_absolute(start, width, height)
-        end_x, end_y = self._convert_relative_to_absolute(end, width, height)
+        start_x, start_y = self._convert_relative_to_absolute(start, display_width, display_height)
+        end_x, end_y = self._convert_relative_to_absolute(end, display_width, display_height)
 
         device_factory = get_device_factory()
         device_factory.swipe(start_x, start_y, end_x, end_y, device_id=self.device_id)
         return ActionResult(True, False)
 
-    def _handle_back(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_back(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle back button action."""
         device_factory = get_device_factory()
         device_factory.back(self.device_id)
         return ActionResult(True, False)
 
-    def _handle_home(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_home(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle home button action."""
         device_factory = get_device_factory()
         device_factory.home(self.device_id)
         return ActionResult(True, False)
 
-    def _handle_double_tap(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_double_tap(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle double tap action."""
         element = action.get("element")
         if not element:
             return ActionResult(False, False, "No element coordinates")
 
-        x, y = self._convert_relative_to_absolute(element, width, height)
+        x, y = self._convert_relative_to_absolute(element, display_width, display_height)
         device_factory = get_device_factory()
         device_factory.double_tap(x, y, self.device_id)
         return ActionResult(True, False)
 
-    def _handle_long_press(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_long_press(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle long press action."""
         element = action.get("element")
         if not element:
             return ActionResult(False, False, "No element coordinates")
 
-        x, y = self._convert_relative_to_absolute(element, width, height)
+        x, y = self._convert_relative_to_absolute(element, display_width, display_height)
         device_factory = get_device_factory()
         device_factory.long_press(x, y, device_id=self.device_id)
         return ActionResult(True, False)
 
-    def _handle_wait(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_wait(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle wait action."""
         duration_str = action.get("duration", "1 seconds")
         try:
@@ -232,25 +242,25 @@ class ActionHandler:
         time.sleep(duration)
         return ActionResult(True, False)
 
-    def _handle_takeover(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_takeover(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle takeover request (login, captcha, etc.)."""
         message = action.get("message", "User intervention required")
         self.takeover_callback(message)
         return ActionResult(True, False)
 
-    def _handle_note(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_note(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle note action (placeholder for content recording)."""
         # This action is typically used for recording page content
         # Implementation depends on specific requirements
         return ActionResult(True, False)
 
-    def _handle_call_api(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_call_api(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle API call action (placeholder for summarization)."""
         # This action is typically used for content summarization
         # Implementation depends on specific requirements
         return ActionResult(True, False)
 
-    def _handle_interact(self, action: dict, width: int, height: int) -> ActionResult:
+    def _handle_interact(self, action: dict, width: int, height: int, display_width: int, display_height: int) -> ActionResult:
         """Handle interaction request (user choice needed)."""
         # This action signals that user input is needed
         return ActionResult(True, False, message="User interaction required")
@@ -339,13 +349,29 @@ def parse_action(response: str) -> dict[str, Any]:
                 raise ValueError(f"Failed to parse do() action: {e}")
 
         elif response.startswith("finish"):
-            action = {
-                "_metadata": "finish",
-                "message": response.replace("finish(message=", "")[1:-2],
-            }
+            # Use AST parsing to support arbitrary message text (including newlines / JSON fences)
+            try:
+                response = response.replace('\n', '\\n')
+                response = response.replace('\r', '\\r')
+                response = response.replace('\t', '\\t')
+
+                tree = ast.parse(response, mode="eval")
+                if not isinstance(tree.body, ast.Call):
+                    raise ValueError("Expected a function call")
+
+                call = tree.body
+                action = {"_metadata": "finish"}
+                for keyword in call.keywords:
+                    key = keyword.arg
+                    value = ast.literal_eval(keyword.value)
+                    action[key] = value
+                if "message" not in action:
+                    action["message"] = ""
+                return action
+            except (SyntaxError, ValueError) as e:
+                raise ValueError(f"Failed to parse finish() action: {e}")
         else:
             raise ValueError(f"Failed to parse action: {response}")
-        return action
     except Exception as e:
         raise ValueError(f"Failed to parse action: {e}")
 

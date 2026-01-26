@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from openai import OpenAI
+import sys
 
 from phone_agent.config.i18n import get_message
 
@@ -109,8 +110,8 @@ class ModelClient:
                     if marker in buffer:
                         # Marker found, print everything before it
                         thinking_part = buffer.split(marker, 1)[0]
-                        print(thinking_part, end="", flush=True)
-                        print()  # Print newline after thinking is complete
+                        self._safe_print(thinking_part)
+                        self._safe_print("\n")
                         in_action_phase = True
                         marker_found = True
 
@@ -136,7 +137,7 @@ class ModelClient:
 
                 if not is_potential_marker:
                     # Safe to print the buffer
-                    print(buffer, end="", flush=True)
+                    self._safe_print(buffer)
                     buffer = ""
 
         # Calculate total time
@@ -149,7 +150,7 @@ class ModelClient:
         lang = self.config.lang
         print()
         print("=" * 50)
-        print(f"⏱️  {get_message('performance_metrics', lang)}:")
+        print(f"{get_message('performance_metrics', lang)}:")
         print("-" * 50)
         if time_to_first_token is not None:
             print(
@@ -172,6 +173,15 @@ class ModelClient:
             time_to_thinking_end=time_to_thinking_end,
             total_time=total_time,
         )
+
+    @staticmethod
+    def _safe_print(text: str) -> None:
+        """Print text safely even when console encoding is GBK."""
+        try:
+            print(text, end="", flush=True)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write(text.encode("utf-8", "replace"))
+            sys.stdout.flush()
 
     def _parse_response(self, content: str) -> tuple[str, str]:
         """
@@ -220,13 +230,23 @@ class MessageBuilder:
     """Helper class for building conversation messages."""
 
     @staticmethod
+    def text_part(text: str) -> dict[str, Any]:
+        """Create a text content part for a multi-modal message."""
+        return {"type": "text", "text": text}
+
+    @staticmethod
+    def image_part_from_data_url(data_url: str) -> dict[str, Any]:
+        """Create an image content part from a full data URL."""
+        return {"type": "image_url", "image_url": {"url": data_url}}
+
+    @staticmethod
     def create_system_message(content: str) -> dict[str, Any]:
         """Create a system message."""
         return {"role": "system", "content": content}
 
     @staticmethod
     def create_user_message(
-        text: str, image_base64: str | None = None
+        text: str, image_base64: str | None = None, image_mime: str = "image/jpeg"
     ) -> dict[str, Any]:
         """
         Create a user message with optional image.
@@ -234,6 +254,7 @@ class MessageBuilder:
         Args:
             text: Text content.
             image_base64: Optional base64-encoded image.
+            image_mime: MIME type for the base64 image (default: image/jpeg).
 
         Returns:
             Message dictionary.
@@ -244,13 +265,18 @@ class MessageBuilder:
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                    "image_url": {"url": f"data:{image_mime};base64,{image_base64}"},
                 }
             )
 
         content.append({"type": "text", "text": text})
 
         return {"role": "user", "content": content}
+
+    @staticmethod
+    def create_user_message_from_parts(parts: list[dict[str, Any]]) -> dict[str, Any]:
+        """Create a user message from already-built multi-modal parts."""
+        return {"role": "user", "content": parts}
 
     @staticmethod
     def create_assistant_message(content: str) -> dict[str, Any]:

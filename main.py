@@ -42,7 +42,7 @@ def check_system_requirements(device_id: str | None = None) -> bool:
     Returns:
         True if all checks pass, False otherwise.
     """
-    print("🔍 Checking HarmonyOS environment...")
+    print("Checking HarmonyOS environment...")
     print("-" * 50)
 
     all_passed = True
@@ -51,7 +51,7 @@ def check_system_requirements(device_id: str | None = None) -> bool:
     print("1. Checking HDC installation...", end=" ")
     tool_cmd = "hdc"
     if shutil.which(tool_cmd) is None:
-        print("❌ FAILED")
+        print("FAILED")
         print("   Error: HDC is not installed or not in PATH.")
         print("   Solution:")
         print("     - Download from HarmonyOS SDK or https://gitee.com/openharmony/docs")
@@ -63,19 +63,19 @@ def check_system_requirements(device_id: str | None = None) -> bool:
                 [tool_cmd, "-v"], capture_output=True, text=True, timeout=10
             )
             version_line = result.stdout.strip().split("\n")[0]
-            print(f"✅ OK ({version_line if version_line else 'installed'})")
+            print(f"OK ({version_line if version_line else 'installed'})")
         except FileNotFoundError:
-            print("❌ FAILED")
+            print("FAILED")
             print("   Error: hdc command not found.")
             all_passed = False
         except subprocess.TimeoutExpired:
-            print("❌ FAILED")
+            print("FAILED")
             print("   Error: hdc command timed out.")
             all_passed = False
 
     if not all_passed:
         print("-" * 50)
-        print("❌ System check failed. Please fix the issues above.")
+        print("System check failed. Please fix the issues above.")
         return False
 
     # Check 2: Device connected
@@ -88,7 +88,7 @@ def check_system_requirements(device_id: str | None = None) -> bool:
         devices = [line for line in lines if line.strip()]
 
         if not devices:
-            print("❌ FAILED")
+            print("FAILED")
             print("   Error: No HarmonyOS devices connected.")
             print("   Solution:")
             print("     1. Enable USB debugging on your HarmonyOS device")
@@ -98,23 +98,23 @@ def check_system_requirements(device_id: str | None = None) -> bool:
         else:
             device_ids = [d.strip() for d in devices]
             print(
-                f"✅ OK ({len(devices)} device(s): {', '.join(device_ids[:2])}{'...' if len(device_ids) > 2 else ''})"
+                f"OK ({len(devices)} device(s): {', '.join(device_ids[:2])}{'...' if len(device_ids) > 2 else ''})"
             )
     except subprocess.TimeoutExpired:
-        print("❌ FAILED")
+        print("FAILED")
         print("   Error: hdc command timed out.")
         all_passed = False
     except Exception as e:
-        print("❌ FAILED")
+        print("FAILED")
         print(f"   Error: {e}")
         all_passed = False
 
     print("-" * 50)
 
     if all_passed:
-        print("✅ All system checks passed!\n")
+        print("All system checks passed!\n")
     else:
-        print("❌ System check failed. Please fix the issues above.")
+        print("System check failed. Please fix the issues above.")
 
     return all_passed
 
@@ -135,7 +135,7 @@ def check_model_api(base_url: str, model_name: str, api_key: str = "EMPTY") -> b
     Returns:
         True if all checks pass, False otherwise.
     """
-    print("🔍 Checking model API...")
+    print("Checking model API...")
     print("-" * 50)
 
     all_passed = True
@@ -157,14 +157,14 @@ def check_model_api(base_url: str, model_name: str, api_key: str = "EMPTY") -> b
 
         # Check if we got a valid response
         if response.choices and len(response.choices) > 0:
-            print("✅ OK")
+            print("OK")
         else:
-            print("❌ FAILED")
+            print("FAILED")
             print("   Error: Received empty response from API")
             all_passed = False
 
     except Exception as e:
-        print("❌ FAILED")
+        print("FAILED")
         error_msg = str(e)
 
         # Provide more specific error messages
@@ -195,9 +195,9 @@ def check_model_api(base_url: str, model_name: str, api_key: str = "EMPTY") -> b
     print("-" * 50)
 
     if all_passed:
-        print("✅ Model API checks passed!\n")
+        print("Model API checks passed!\n")
     else:
-        print("❌ Model API check failed. Please fix the issues above.")
+        print("Model API check failed. Please fix the issues above.")
 
     return all_passed
 
@@ -211,6 +211,9 @@ def parse_args() -> argparse.Namespace:
 Examples:
     # Run with default settings (HarmonyOS via HDC)
     python main.py "打开微信发送一条消息"
+
+    # Reproduce leak case from DevEcoTesting artifacts by timestamp (ms)
+    python main.py --leak-ts-ms 1769048341000
 
     # Specify model endpoint
     python main.py --base-url http://localhost:8000/v1
@@ -312,6 +315,25 @@ Examples:
         "--list-apps", action="store_true", help="List supported apps and exit"
     )
 
+    # Leak reproduction options (DevEcoTesting)
+    parser.add_argument(
+        "--leak-ts-ms",
+        type=int,
+        default=0,
+        help="Leak timestamp in epoch milliseconds; when set, runs leak reproduction workflow using DevEcoTesting artifacts",
+    )
+    parser.add_argument(
+        "--devecotesting-root",
+        type=str,
+        default="devecotesting",
+        help="DevEcoTesting artifact root directory (default: devecotesting)",
+    )
+    parser.add_argument("--pre-window-s", type=int, default=30)
+    parser.add_argument("--post-window-s", type=int, default=10)
+    parser.add_argument("--max-actions", type=int, default=6)
+    parser.add_argument("--max-screenshots", type=int, default=2)
+    parser.add_argument("--suspect-k", type=int, default=3)
+
     parser.add_argument(
         "task",
         nargs="?",
@@ -342,7 +364,7 @@ def handle_device_commands(args) -> bool:
             print("Connected devices:")
             print("-" * 60)
             for device in devices:
-                status_icon = "✓" if device.status == "device" else "✗"
+                status_icon = "OK" if device.status == "device" else "NO"
                 conn_type = device.connection_type.value
                 model_info = f" ({device.model})" if device.model else ""
                 print(
@@ -354,7 +376,7 @@ def handle_device_commands(args) -> bool:
     if args.connect:
         print(f"Connecting to {args.connect}...")
         success, message = conn.connect(args.connect)
-        print(f"{'✓' if success else '✗'} {message}")
+        print(f"{'OK' if success else 'NO'} {message}")
         if success:
             # Set as default device
             args.device_id = args.connect
@@ -368,7 +390,7 @@ def handle_device_commands(args) -> bool:
         else:
             print(f"Disconnecting from {args.disconnect}...")
             success, message = conn.disconnect(args.disconnect)
-        print(f"{'✓' if success else '✗'} {message}")
+        print(f"{'OK' if success else 'NO'} {message}")
         return True
 
     # Handle --enable-tcpip
@@ -377,7 +399,7 @@ def handle_device_commands(args) -> bool:
         print(f"Enabling TCP/IP debugging on port {port}...")
 
         success, message = conn.enable_tcpip(port, args.device_id)
-        print(f"{'✓' if success else '✗'} {message}")
+        print(f"{'OK' if success else 'NO'} {message}")
 
         if success:
             # Try to get device IP
@@ -424,6 +446,13 @@ def main():
     if not check_model_api(args.base_url, args.model, args.apikey):
         sys.exit(1)
 
+    # Resolve device id early so all HDC commands consistently include `-t <device>`.
+    device_factory = get_device_factory()
+    devices = device_factory.list_devices()
+    resolved_device_id: str | None = args.device_id
+    if not resolved_device_id and devices:
+        resolved_device_id = devices[0].device_id
+
     # Create configurations and agent
     model_config = ModelConfig(
         base_url=args.base_url,
@@ -434,7 +463,7 @@ def main():
 
     agent_config = AgentConfig(
         max_steps=args.max_steps,
-        device_id=args.device_id,
+        device_id=resolved_device_id,
         verbose=not args.quiet,
         lang="cn",
     )
@@ -454,14 +483,84 @@ def main():
     print(f"Language: {agent_config.lang}")
 
     # Show device info
-    device_factory = get_device_factory()
-    devices = device_factory.list_devices()
     if agent_config.device_id:
         print(f"Device: {agent_config.device_id}")
     elif devices:
-        print(f"Device: {devices[0].device_id} (auto-detected)")
+        # Should not happen due to early resolution, but keep as a fallback.
+        agent_config.device_id = devices[0].device_id
+        agent.action_handler.device_id = agent_config.device_id
+        print(f"Device: {agent_config.device_id} (auto-detected)")
 
     print("=" * 50)
+
+    # Leak reproduction flow (timestamp-driven, no manual task required)
+    if args.leak_ts_ms:
+        from workflow.devecotesting_case_builder import BuildOptions, build_leak_case_from_devecotesting
+        from workflow.leak_system_prompt import LEAK_SYSTEM_PROMPT
+        from workflow.prompt_builder import (
+            build_leak_case_extra_messages,
+            build_leak_case_task_hint,
+        )
+        from workflow.screen_match import similarity_file_vs_base64_jpeg
+        from workflow.sequence_extract import extract_repro_sequence_from_finish_message
+
+        options = BuildOptions(
+            pre_window_s=args.pre_window_s,
+            post_window_s=args.post_window_s,
+            max_actions=args.max_actions,
+            max_screenshots=args.max_screenshots,
+            suspect_k=args.suspect_k,
+        )
+
+        case = build_leak_case_from_devecotesting(
+            args.leak_ts_ms, args.devecotesting_root, options=options
+        )
+        extra_messages = build_leak_case_extra_messages(case)
+        task_hint = build_leak_case_task_hint(case)
+
+        # Leak-mode: use a shorter system prompt and reduce completion token budget.
+        if case.target_app_name or case.target_bundle_name:
+            agent.agent_config.system_prompt = (
+                LEAK_SYSTEM_PROMPT
+                + f"\n目标APP（来自 DevEcoTesting layout）: {case.target_app_name or '未知'} / {case.target_bundle_name or ''}\n"
+            )
+        else:
+            agent.agent_config.system_prompt = LEAK_SYSTEM_PROMPT
+        agent.model_config.max_tokens = min(agent.model_config.max_tokens, 1200)
+        agent.agent_config.max_same_screen_steps = min(agent.agent_config.max_same_screen_steps, 8)
+
+        print(f"\nLeak Case: {case.case_id}")
+        print(f"Leak ts(ms): {case.leak_ts_ms}")
+        if case.target_app_name or case.target_bundle_name:
+            print(f"Target app: {case.target_app_name} ({case.target_bundle_name})")
+        print(f"Actions: {len(case.actions)}")
+        print(f"Screenshots: {len(case.screenshots)}\n")
+
+        # Provide a numeric screen match score to help the model stay anchored to the target scene.
+        pre_ref = case.key_screenshots.get("pre_leak")
+        if pre_ref is not None:
+            def _hook(current_app: str, screen_base64: str):
+                try:
+                    score = similarity_file_vs_base64_jpeg(pre_ref.path, screen_base64)
+                except Exception:
+                    score = None
+                return {
+                    "leak_mode": True,
+                    "target_app": case.target_app_name,
+                    "pre_leak_ts_ms": pre_ref.ts_ms,
+                    "pre_leak_match_score": score,
+                }
+
+            agent.agent_config.screen_info_hook = _hook
+
+        result = agent.run(task_hint, extra_messages=extra_messages)
+        print(f"\nResult: {result}")
+
+        seq = extract_repro_sequence_from_finish_message(result)
+        if seq is not None:
+            print("\nDetected <LEAK_SEQUENCE_READY> with JSON payload.")
+            print("You can replay it via PhoneAgent.execute_repro_sequence(seq, repeat_count=...).")
+        return
 
     # Run with provided task or enter interactive mode
     if args.task:
