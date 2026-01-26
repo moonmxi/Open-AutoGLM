@@ -145,51 +145,62 @@ class ModelClient:
                     if is_potential_marker:
                         break
 
+                # Do not stream-print buffer; keep console clean
                 if not is_potential_marker:
-                    # Safe to print the buffer
-                    self._safe_print(buffer)
                     buffer = ""
 
         # Calculate total time
         total_time = time.time() - start_time
 
-        # Parse thinking and action from response
+        # Use full_stream_text as fallback raw when content channel is empty (some providers only send reasoning_content)
+        if not raw_content.strip() and full_stream_text:
+            raw_content = full_stream_text
+
+        # Parse thinking and action from response, with fallbacks
         thinking, action = self._parse_response(raw_content)
+        if (not action or not action.strip()) and full_stream_text != raw_content:
+            t2, a2 = self._parse_response(full_stream_text)
+            if a2 and a2.strip():
+                thinking = t2 or thinking
+                action = a2
+        if (not action or not action.strip()) and reasoning_full:
+            t3, a3 = self._parse_response(reasoning_full)
+            if a3 and a3.strip():
+                thinking = t3 or thinking
+                action = a3
+
+        # Merge reasoning_full without重复
         if reasoning_full:
-            thinking = (reasoning_full + "\n" + (thinking or "")).strip()
+            def _norm(s: str | None) -> str:
+                return " ".join((s or "").split())
 
-        # Always print full raw content for debugging
-        self._safe_print("\n\n[Raw Model Reply]\n")
-        self._safe_print(full_stream_text + "\n")
-        self._safe_print("[Parsed Thinking]\n")
-        self._safe_print((thinking or "(empty)") + "\n")
-        self._safe_print("[Parsed Action]\n")
-        self._safe_print((action or "(empty)") + "\n")
+            reason_norm = _norm(reasoning_full)
+            think_norm = _norm(thinking)
+            if not think_norm:
+                thinking = reasoning_full.strip()
+            elif reason_norm and reason_norm not in think_norm and think_norm not in reason_norm:
+                thinking = (reasoning_full + "\n" + (thinking or "")).strip()
 
+        # Pretty console output with cleaned tags
+        def _strip_tags(text: str | None) -> str:
+            import re
 
-        # Print performance metrics
-        lang = self.config.lang
-        print()
-        print("=" * 50)
-        print(f"{get_message('performance_metrics', lang)}:")
-        print("-" * 50)
-        if time_to_first_token is not None:
-            print(
-                f"{get_message('time_to_first_token', lang)}: {time_to_first_token:.3f}s"
-            )
-        if time_to_thinking_end is not None:
-            print(
-                f"{get_message('time_to_thinking_end', lang)}:        {time_to_thinking_end:.3f}s"
-            )
-        print(
-            f"{get_message('total_inference_time', lang)}:          {total_time:.3f}s"
-        )
-        print("=" * 50)
+            if not text:
+                return ""
+            return re.sub(r"</?(think|answer)>", "", text).strip()
+
+        clean_thinking = _strip_tags(thinking)
+        clean_action = _strip_tags(action)
+
+        sep = "-" * 48
+        print(f"思考: {clean_thinking or '(empty)'}")
+        print(f"动作: {clean_action or '(empty)'}")
+        print(sep)
 
         return ModelResponse(
             thinking=thinking,
             action=action,
-            raw_content=raw_content,
+            raw_content=raw_content or full_stream_text,
             time_to_first_token=time_to_first_token,
             time_to_thinking_end=time_to_thinking_end,
             total_time=total_time,

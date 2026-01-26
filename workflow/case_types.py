@@ -18,9 +18,17 @@ class DevEcoAction:
     suggested_element: list[int] | None = None  # 0-999 relative coordinates
     suggested_bounds: tuple[int, int, int, int] | None = None  # (x1,y1,x2,y2) in layout pixels
     suggested_layout_ts_ms: int | None = None
+    before_shot: "ScreenshotRef | None" = None
+    after_shot: "ScreenshotRef | None" = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # Convert nested ScreenshotRef to serializable form
+        for k in ("before_shot", "after_shot"):
+            ref = payload.get(k)
+            if isinstance(ref, ScreenshotRef):
+                payload[k] = ref.to_dict()
+        return payload
 
 
 @dataclass(frozen=True)

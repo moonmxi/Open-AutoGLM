@@ -333,9 +333,17 @@ def parse_action(response: str) -> dict[str, Any]:
         if marker_idx != -1:
             content = content[marker_idx:].strip()
 
-        # Drop trailing closing tags
-        if content.endswith("</answer>"):
-            content = content[: -len("</answer>")].strip()
+        # Strip repeated leading/trailing XML tags (e.g., <answer><answer> ... </answer></answer>)
+        content = re.sub(r"^(<answer>\s*)+", "", content, flags=re.I)
+        content = re.sub(r"(</[a-zA-Z]+>\s*)+$", "", content)
+        content = content.strip()
+
+        # If there's trailing text after the first closing ')', trim it to keep AST parsing clean.
+        if content.startswith(("do(", "finish(")):
+            closing_idx = content.find(")")
+            if closing_idx != -1:
+                content = content[: closing_idx + 1]
+            content = content.strip()
 
         if content.startswith('do(action="Type"') or content.startswith(
             'do(action="Type_Name"'

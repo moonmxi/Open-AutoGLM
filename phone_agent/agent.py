@@ -97,6 +97,8 @@ class PhoneAgent:
         self._last_action_result: dict[str, Any] | None = None
         self._reference_images_stripped = False
         self._leak_phase: str | None = None
+        self._last_action_before_base64: str | None = None
+        self._last_action_after_base64: str | None = None
 
     def run(self, task: str, *, extra_messages: list[dict[str, Any]] | None = None) -> str:
         """
@@ -119,6 +121,8 @@ class PhoneAgent:
         self._last_action_result = None
         self._reference_images_stripped = False
         self._leak_phase = None
+        self._last_action_before_base64 = None
+        self._last_action_after_base64 = None
         self._leak_phase = None
 
         # First step with user prompt
@@ -335,6 +339,15 @@ class PhoneAgent:
         }
         if self._same_screen_streak >= 3:
             extra_screen_info["progress_hint"] = "Same screen repeated; change strategy (reset/back/home/launch or try different path)."
+        if (
+            self._same_screen_streak >= 2
+            and self._repeat_action_streak >= 2
+            and self._last_action_result is not None
+            and not self._last_action_result.get("success", True)
+        ):
+            extra_screen_info["progress_hint"] = (
+                "Repeated identical action with no progress; adjust target/coords or choose another navigation path (e.g., Back -> Home -> relaunch)."
+            )
 
         # Build messages
         if is_first:
@@ -345,23 +358,28 @@ class PhoneAgent:
             if extra_messages:
                 self._context.extend(extra_messages)
 
-            screen_info = MessageBuilder.build_screen_info(current_app, **extra_screen_info)
+        screen_info = MessageBuilder.build_screen_info(current_app, **extra_screen_info)
+        if is_first and user_prompt:
             text_content = f"{user_prompt}\n\n{screen_info}"
-
-            self._context.append(
-                MessageBuilder.create_user_message(
-                    text=text_content, image_base64=screenshot.base64_data, image_mime="image/jpeg"
-                )
-            )
         else:
-            screen_info = MessageBuilder.build_screen_info(current_app, **extra_screen_info)
             text_content = f"** Screen Info **\n\n{screen_info}"
 
-            self._context.append(
-                MessageBuilder.create_user_message(
-                    text=text_content, image_base64=screenshot.base64_data, image_mime="image/jpeg"
-                )
+        # Build a multi-modal user message that can include previous step screenshots.
+        parts: list[dict[str, Any]] = [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot.base64_data}"}},
+            {"type": "text", "text": text_content},
+        ]
+        if self._last_action_before_base64 and self._last_action_after_base64:
+            parts.extend(
+                [
+                    {"type": "text", "text": "【上一步操作前截图】用于对比定位点击对象"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{self._last_action_before_base64}"}},
+                    {"type": "text", "text": "【上一步操作后截图】"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{self._last_action_after_base64}"}},
+                ]
             )
+
+        self._context.append(MessageBuilder.create_user_message_from_parts(parts))
 
         # Get model response
         try:
@@ -385,9 +403,20 @@ class PhoneAgent:
         try:
             action = parse_action(response.action)
         except ValueError as e:
-            if self.agent_config.verbose:
-                traceback.print_exc()
-            action = finish(message=str(e))
+            # Fallback: try raw_content (e.g., malformed <answer><answer> or empty action field)
+            fallback_parsed = None
+            raw_resp = getattr(response, "raw_content", None)
+            if raw_resp:
+                try:
+                    fallback_parsed = parse_action(raw_resp)
+                except Exception:
+                    fallback_parsed = None
+            if fallback_parsed:
+                action = fallback_parsed
+            else:
+                if self.agent_config.verbose:
+                    traceback.print_exc()
+                action = finish(message=str(e))
 
         action_signature = json.dumps(action, sort_keys=True, ensure_ascii=False)
         if action_signature == self._last_action_signature:
@@ -418,6 +447,15 @@ class PhoneAgent:
             result = self.action_handler.execute(
                 finish(message=str(e)), screenshot.width, screenshot.height
             )
+
+        # Capture post-action screenshot for next-step comparison (helps the model infer click effects).
+        try:
+            post_action_shot = device_factory.get_screenshot(self.agent_config.device_id)
+            self._last_action_before_base64 = screenshot.base64_data
+            self._last_action_after_base64 = post_action_shot.base64_data
+        except Exception:
+            self._last_action_before_base64 = None
+            self._last_action_after_base64 = None
 
         # Keep reference screenshots in context for the whole run (scene alignment is the core of leak mode).
 

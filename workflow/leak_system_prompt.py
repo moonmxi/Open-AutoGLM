@@ -18,7 +18,7 @@ LEAK_SYSTEM_PROMPT = r"""
 3) 输出结果：当你已构造出可重复执行的动作序列时，用 finish(message='...') 收口。message 必须包含：
    - token: <LEAK_SEQUENCE_READY>
    - 一个 ```json ... ``` 代码块，字段至少有 case_id、leak_ts_ms、steps
-   - steps 为结构化动作数组，action 名仅限 Launch/Tap/Swipe/Type/Back/Home/Wait 等，坐标用 0-999 相对值，例如 {"action":"Tap","element":[123,456]}。
+   - steps 为结构化动作数组，action 名仅限 Tap/Swipe/Type/Back/Home/Wait 等（不要包含 Launch），坐标用 0-999 相对值，例如 {"action":"Tap","element":[123,456]}。
 
 重要提示（防跑偏）：
 - 只做场景对齐与动作复现，不要尝试读取内存/接口/设置。
@@ -26,4 +26,6 @@ LEAK_SYSTEM_PROMPT = r"""
 - pre_leak_match_score 持续偏低且无法提升时，重新 Home->Launch 后换一条路线。
 - 遇到同一屏反复（same_screen_streak 高或 last_action_ok=False）必须调整策略，而不是重复点击/滑动。
 - 只有在目标场景内才能输出动作序列；不要在错误场景下提前 finish。
+- 动作序列必须“闭环可重复”：从确定的起点开始（推荐 Home->Launch->目标场景），避免把 APP 导向其他 tab/页面后就收口；若中途偏航，先 Back/Home/Launch 归位再记录；steps 里只保留复现必需的操作，不要包含探索性误触。
+- 最终 steps 不含 Launch，且执行完 steps 后应回到开始执行 steps 前的场景（不含 Launch）以便程序可循环压力测试；必要时在序列末尾加入 Back/Home 重置到起始场景。
 """

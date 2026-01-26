@@ -380,6 +380,13 @@ def _suggest_element_from_xpath(layout_path: Path, xpath: str) -> tuple[list[int
     return [rel_x, rel_y], b
 
 
+def _mk_ref(ts: int, path: Path, label: str, layout_dir: Path) -> ScreenshotRef:
+    layout_path = layout_dir / f"{ts}.json"
+    return ScreenshotRef(
+        ts_ms=ts, path=path, label=label, layout_path=layout_path if layout_path.exists() else None
+    )
+
+
 def _pick_screenshots_around_ts(
     shots: list[tuple[int, Path]],
     leak_ts_ms: int,
@@ -404,17 +411,11 @@ def _pick_screenshots_around_ts(
     if post_idx >= len(shots):
         post_idx = len(shots) - 1
 
-    def mk_ref(ts: int, path: Path, label: str) -> ScreenshotRef:
-        layout_path = layout_dir / f"{ts}.json"
-        return ScreenshotRef(
-            ts_ms=ts, path=path, label=label, layout_path=layout_path if layout_path.exists() else None
-        )
-
     pre_ts, pre_path = shots[pre_idx]
     post_ts, post_path = shots[post_idx]
     key = {
-        "pre_leak": mk_ref(pre_ts, pre_path, "pre_leak"),
-        "post_leak": mk_ref(post_ts, post_path, "post_leak"),
+        "pre_leak": _mk_ref(pre_ts, pre_path, "pre_leak", layout_dir),
+        "post_leak": _mk_ref(post_ts, post_path, "post_leak", layout_dir),
     }
 
     # Extra context around pre/post
@@ -445,7 +446,7 @@ def _pick_screenshots_around_ts(
     refs: list[ScreenshotRef] = []
     for idx in picked_indices:
         ts, path = shots[idx]
-        refs.append(mk_ref(ts, path, label=f"context_{ts}"))
+        refs.append(_mk_ref(ts, path, label=f"context_{ts}", layout_dir=layout_dir))
 
     return refs, key
 
@@ -541,6 +542,30 @@ def _extract_text_hints_from_layout(layout_path: Path, *, limit: int = 24) -> li
 
     walk(data)
     return texts[:limit]
+
+
+def _nearest_before_after_shots(
+    shots: list[tuple[int, Path]], ts_ms: int
+) -> tuple[tuple[int, Path] | None, tuple[int, Path] | None]:
+    """
+    Return the closest screenshot at or before ts_ms, and the closest at or after ts_ms.
+    """
+    if not shots:
+        return None, None
+
+    before = None
+    after = None
+    for ts, path in shots:
+        if ts <= ts_ms:
+            before = (ts, path)
+        if ts >= ts_ms and after is None:
+            after = (ts, path)
+            break
+    if before is None:
+        before = shots[0]
+    if after is None:
+        after = shots[-1]
+    return before, after
 
 
 def choose_sample_leak_timestamp_ms(devecotesting_root: str | Path) -> int:
@@ -647,6 +672,17 @@ def build_leak_case_from_devecotesting(
                 if suggested is not None:
                     suggested_element, suggested_bounds = suggested
                     suggested_layout_ts_ms = ts
+
+        before_ref = None
+        after_ref = None
+        before, after = _nearest_before_after_shots(shots, a.ts_ms)
+        if before is not None:
+            bts, bpath = before
+            before_ref = _mk_ref(bts, bpath, label=f"action_{a.global_index}_before", layout_dir=layout_dir)
+        if after is not None:
+            ats, apath = after
+            after_ref = _mk_ref(ats, apath, label=f"action_{a.global_index}_after", layout_dir=layout_dir)
+
         enriched_actions.append(
             DevEcoAction(
                 ts_ms=a.ts_ms,
@@ -660,6 +696,8 @@ def build_leak_case_from_devecotesting(
                 suggested_element=suggested_element,
                 suggested_bounds=suggested_bounds,
                 suggested_layout_ts_ms=suggested_layout_ts_ms,
+                before_shot=before_ref,
+                after_shot=after_ref,
             )
         )
     flattened = enriched_actions
