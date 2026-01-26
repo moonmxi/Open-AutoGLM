@@ -69,6 +69,9 @@ class ModelClient:
         time_to_first_token = None
         time_to_thinking_end = None
 
+        # Enable model-side思考流 if supported (e.g., glm-4.6v)
+        merged_extra_body = {"thinking": {"type": "enabled"}, **(self.config.extra_body or {})}
+
         stream = self.client.chat.completions.create(
             messages=messages,
             model=self.config.model_name,
@@ -76,22 +79,32 @@ class ModelClient:
             temperature=self.config.temperature,
             top_p=self.config.top_p,
             frequency_penalty=self.config.frequency_penalty,
-            extra_body=self.config.extra_body,
+            extra_body=merged_extra_body,
             stream=True,
         )
 
         raw_content = ""
         buffer = ""  # Buffer to hold content that might be part of a marker
-        action_markers = ["finish(message=", "do(action="]
+        action_markers = ["finish(message=", "do(action=", "<answer>"]
         in_action_phase = False  # Track if we've entered the action phase
         first_token_received = False
+        full_stream_text = ""
+        reasoning_full = ""
 
         for chunk in stream:
             if len(chunk.choices) == 0:
                 continue
-            if chunk.choices[0].delta.content is not None:
-                content = chunk.choices[0].delta.content
+            choice = chunk.choices[0]
+
+            # reasoning_content (BigModel支持) 作为思考内容
+            rc = getattr(choice.delta, "reasoning_content", None)
+            if rc is not None:
+                reasoning_full += rc
+
+            if choice.delta.content is not None:
+                content = choice.delta.content
                 raw_content += content
+                full_stream_text += content
 
                 # Record time to first token
                 if not first_token_received:
@@ -108,10 +121,7 @@ class ModelClient:
                 marker_found = False
                 for marker in action_markers:
                     if marker in buffer:
-                        # Marker found, print everything before it
-                        thinking_part = buffer.split(marker, 1)[0]
-                        self._safe_print(thinking_part)
-                        self._safe_print("\n")
+                        # Marker found; stop streaming print to avoid duplication
                         in_action_phase = True
                         marker_found = True
 
@@ -145,6 +155,17 @@ class ModelClient:
 
         # Parse thinking and action from response
         thinking, action = self._parse_response(raw_content)
+        if reasoning_full:
+            thinking = (reasoning_full + "\n" + (thinking or "")).strip()
+
+        # Always print full raw content for debugging
+        self._safe_print("\n\n[Raw Model Reply]\n")
+        self._safe_print(full_stream_text + "\n")
+        self._safe_print("[Parsed Thinking]\n")
+        self._safe_print((thinking or "(empty)") + "\n")
+        self._safe_print("[Parsed Action]\n")
+        self._safe_print((action or "(empty)") + "\n")
+
 
         # Print performance metrics
         lang = self.config.lang

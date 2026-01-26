@@ -11,7 +11,7 @@ from phone_agent.config.timing import TIMING_CONFIG
 
 
 # Global flag to control HDC command output
-_HDC_VERBOSE = os.getenv("HDC_VERBOSE", "false").lower() in ("true", "1", "yes")
+_HDC_VERBOSE = False
 
 # Some HarmonyOS HDC builds require `-t <device>` even when only one device is connected.
 # We auto-inject a target for device-scoped commands to avoid "need connect-key" failures.

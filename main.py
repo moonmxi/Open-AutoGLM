@@ -425,7 +425,7 @@ def main():
     # Enable verbose HDC output to aid troubleshooting
     from phone_agent.hdc import set_hdc_verbose
 
-    set_hdc_verbose(True)
+    set_hdc_verbose(False)
 
     # Handle --list-apps (no system check needed)
     if args.list_apps:

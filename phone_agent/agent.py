@@ -96,6 +96,7 @@ class PhoneAgent:
         self._repeat_action_streak = 0
         self._last_action_result: dict[str, Any] | None = None
         self._reference_images_stripped = False
+        self._leak_phase: str | None = None
 
     def run(self, task: str, *, extra_messages: list[dict[str, Any]] | None = None) -> str:
         """
@@ -117,6 +118,8 @@ class PhoneAgent:
         self._repeat_action_streak = 0
         self._last_action_result = None
         self._reference_images_stripped = False
+        self._leak_phase = None
+        self._leak_phase = None
 
         # First step with user prompt
         result = self._execute_step(task, is_first=True, extra_messages=extra_messages)
@@ -276,6 +279,30 @@ class PhoneAgent:
             except Exception:
                 extra_screen_info = {}
 
+        # Track leak-mode阶段，指导模型先对齐场景再复现动作。
+        leak_mode_flag = bool(extra_screen_info.get("leak_mode"))
+        if leak_mode_flag and self._leak_phase is None:
+            self._leak_phase = "scene_nav"
+        if leak_mode_flag:
+            score = extra_screen_info.get("pre_leak_match_score")
+            if (
+                self._leak_phase == "scene_nav"
+                and isinstance(score, (int, float))
+                and score >= 0.9
+            ):
+                self._leak_phase = "replay_ready"
+
+            phase_hint = (
+                "阶段1：先用参考截图对齐到 pre_leak，再去复现动作序列"
+                if self._leak_phase == "scene_nav"
+                else "阶段2：已对齐目标界面，可按动作窗口复现并拼接可重复 steps（准备 <LEAK_SEQUENCE_READY>）"
+            )
+            extra_screen_info = {
+                **extra_screen_info,
+                "leak_phase": self._leak_phase,
+                "leak_phase_hint": phase_hint,
+            }
+
         if self._last_action_result is not None:
             # If the last action produced no visible change, hint the model to adjust.
             if (
@@ -357,10 +384,10 @@ class PhoneAgent:
         # Parse action from response
         try:
             action = parse_action(response.action)
-        except ValueError:
+        except ValueError as e:
             if self.agent_config.verbose:
                 traceback.print_exc()
-            action = finish(message=response.action)
+            action = finish(message=str(e))
 
         action_signature = json.dumps(action, sort_keys=True, ensure_ascii=False)
         if action_signature == self._last_action_signature:

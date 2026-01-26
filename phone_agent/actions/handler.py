@@ -316,48 +316,65 @@ def parse_action(response: str) -> dict[str, Any]:
         ValueError: If the response cannot be parsed.
     """
     print(f"Parsing action: {response}")
+    raw = response or ""
     try:
-        response = response.strip()
-        if response.startswith('do(action="Type"') or response.startswith(
+        content = raw.strip()
+        if not content:
+            raise ValueError("empty action text")
+
+        # Extract the last <answer>...</answer> block if present
+        if "<answer>" in content and "</answer>" in content:
+            matches = re.findall(r"<answer>(.*?)</answer>", content, flags=re.S)
+            if matches:
+                content = matches[-1].strip()
+
+        # Trim to the last actionable marker to drop <think>/其他文本
+        marker_idx = max(content.rfind("finish("), content.rfind("do("))
+        if marker_idx != -1:
+            content = content[marker_idx:].strip()
+
+        # Drop trailing closing tags
+        if content.endswith("</answer>"):
+            content = content[: -len("</answer>")].strip()
+
+        if content.startswith('do(action="Type"') or content.startswith(
             'do(action="Type_Name"'
         ):
-            text = response.split("text=", 1)[1][1:-2]
-            action = {"_metadata": "do", "action": "Type", "text": text}
-            return action
-        elif response.startswith("do"):
+            text = content.split("text=", 1)[1][1:-2]
+            return {"_metadata": "do", "action": "Type", "text": text}
+
+        if content.startswith("do"):
             # Use AST parsing instead of eval for safety
             try:
-                # Escape special characters (newlines, tabs, etc.) for valid Python syntax
-                response = response.replace('\n', '\\n')
-                response = response.replace('\r', '\\r')
-                response = response.replace('\t', '\\t')
-
-                tree = ast.parse(response, mode="eval")
+                sanitized = (
+                    content.replace("\n", "\\n")
+                    .replace("\r", "\\r")
+                    .replace("\t", "\\t")
+                )
+                tree = ast.parse(sanitized, mode="eval")
                 if not isinstance(tree.body, ast.Call):
-                    raise ValueError("Expected a function call")
+                    raise ValueError("expected a function call")
 
                 call = tree.body
-                # Extract keyword arguments safely
                 action = {"_metadata": "do"}
                 for keyword in call.keywords:
                     key = keyword.arg
                     value = ast.literal_eval(keyword.value)
                     action[key] = value
-
                 return action
             except (SyntaxError, ValueError) as e:
                 raise ValueError(f"Failed to parse do() action: {e}")
 
-        elif response.startswith("finish"):
-            # Use AST parsing to support arbitrary message text (including newlines / JSON fences)
+        if content.startswith("finish"):
             try:
-                response = response.replace('\n', '\\n')
-                response = response.replace('\r', '\\r')
-                response = response.replace('\t', '\\t')
-
-                tree = ast.parse(response, mode="eval")
+                sanitized = (
+                    content.replace("\n", "\\n")
+                    .replace("\r", "\\r")
+                    .replace("\t", "\\t")
+                )
+                tree = ast.parse(sanitized, mode="eval")
                 if not isinstance(tree.body, ast.Call):
-                    raise ValueError("Expected a function call")
+                    raise ValueError("expected a function call")
 
                 call = tree.body
                 action = {"_metadata": "finish"}
@@ -370,10 +387,10 @@ def parse_action(response: str) -> dict[str, Any]:
                 return action
             except (SyntaxError, ValueError) as e:
                 raise ValueError(f"Failed to parse finish() action: {e}")
-        else:
-            raise ValueError(f"Failed to parse action: {response}")
+
+        raise ValueError(f"unrecognized action text: {content[:160]}")
     except Exception as e:
-        raise ValueError(f"Failed to parse action: {e}")
+        raise ValueError(f"Failed to parse action: {e} (raw={raw!r})")
 
 
 def do(**kwargs) -> dict[str, Any]:
