@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from workflow.case_types import LeakCase, ScreenshotRef
+from .case_types import LeakCase, ScreenshotRef
 
 
 def _text_part(text: str) -> dict[str, Any]:
@@ -254,6 +254,11 @@ def build_leak_case_extra_messages(case: LeakCase) -> list[dict[str, Any]]:
     if case.anchor_action_window_index is not None:
         candidate_indices.append(case.anchor_action_window_index)
     candidate_indices.extend(case.suspect_action_window_indices)
+    # Always include MUST_REPLAY (the last two actions at/before leak_ts_ms) so the model
+    # can see before/after snapshots of the most critical recorded steps.
+    pre_actions = [i for i, a in enumerate(case.actions) if a.ts_ms <= case.leak_ts_ms]
+    if pre_actions:
+        candidate_indices.extend(pre_actions[-2:] if len(pre_actions) >= 2 else pre_actions[-1:])
     candidate_indices = sorted({i for i in candidate_indices if 0 <= i < len(case.actions)})[:4]
 
     max_images = 6

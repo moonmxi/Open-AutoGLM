@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from phone_agent.config.apps_harmonyos import get_app_name
-from workflow.case_types import DevEcoAction, LeakCase, ScreenshotRef
+from .case_types import DevEcoAction, LeakCase, ScreenshotRef
 
 _TS_IMAGE_RE = re.compile(r"^(?P<ts>\d{10,})\.(?P<ext>jpe?g|png)$", re.IGNORECASE)
 _TS_JSON_RE = re.compile(r"^(?P<ts>\d{10,})\.json$", re.IGNORECASE)

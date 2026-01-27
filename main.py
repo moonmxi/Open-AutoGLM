@@ -23,7 +23,7 @@ from openai import OpenAI
 
 from phone_agent import PhoneAgent
 from phone_agent.agent import AgentConfig
-from phone_agent.config import list_supported_apps
+from phone_agent.config.apps_harmonyos import list_supported_apps
 from phone_agent.device_factory import DeviceType, get_device_factory, set_device_type
 from phone_agent.model import ModelConfig
 
@@ -495,14 +495,19 @@ def main():
 
     # Leak reproduction flow (timestamp-driven, no manual task required)
     if args.leak_ts_ms:
-        from workflow.devecotesting_case_builder import BuildOptions, build_leak_case_from_devecotesting
-        from workflow.leak_system_prompt import LEAK_SYSTEM_PROMPT
-        from workflow.prompt_builder import (
+        from phone_agent.workflow.devecotesting_case_builder import (
+            BuildOptions,
+            build_leak_case_from_devecotesting,
+        )
+        from phone_agent.workflow.leak_system_prompt import LEAK_SYSTEM_PROMPT
+        from phone_agent.workflow.prompt_builder import (
             build_leak_case_extra_messages,
             build_leak_case_task_hint,
         )
-        from workflow.screen_match import similarity_file_vs_base64_jpeg
-        from workflow.sequence_extract import extract_repro_sequence_from_finish_message
+        from phone_agent.workflow.screen_match import similarity_file_vs_base64_jpeg
+        from phone_agent.workflow.sequence_extract import (
+            extract_repro_sequence_from_finish_message,
+        )
 
         options = BuildOptions(
             pre_window_s=args.pre_window_s,
@@ -536,7 +541,9 @@ def main():
         print(f"Actions: {len(case.actions)}")
         print(f"Screenshots: {len(case.screenshots)}\n")
 
-        # Provide a numeric screen match score to help the model stay anchored to the target scene.
+        # Provide numeric screen match scores to help the model stay anchored:
+        # - pre_leak: target scene alignment
+        # - action_before_matches: infer which recorded action-state the current screen resembles
         pre_ref = case.key_screenshots.get("pre_leak")
         if pre_ref is not None:
             def _hook(current_app: str, screen_base64: str):
@@ -544,11 +551,30 @@ def main():
                     score = similarity_file_vs_base64_jpeg(pre_ref.path, screen_base64)
                 except Exception:
                     score = None
+                # Compare current screen to per-action "before" snapshots (top-k only to control token size).
+                action_matches: list[dict[str, object]] = []
+                try:
+                    scored: list[tuple[float, int, str, int]] = []
+                    for idx, a in enumerate(case.actions):
+                        ref = getattr(a, "before_shot", None)
+                        if ref is None or not getattr(ref, "path", None):
+                            continue
+                        try:
+                            s = similarity_file_vs_base64_jpeg(ref.path, screen_base64)
+                        except Exception:
+                            continue
+                        scored.append((float(s), idx, str(getattr(a, "action_type", "")), int(getattr(a, "ts_ms", 0))))
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    for s, idx, typ, ts in scored[:3]:
+                        action_matches.append({"idx": idx, "ts_ms": ts, "type": typ, "score": round(s, 4)})
+                except Exception:
+                    action_matches = []
                 return {
                     "leak_mode": True,
                     "target_app": case.target_app_name,
                     "pre_leak_ts_ms": pre_ref.ts_ms,
                     "pre_leak_match_score": score,
+                    "best_action_before_matches": action_matches,
                 }
 
             agent.agent_config.screen_info_hook = _hook

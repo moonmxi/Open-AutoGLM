@@ -13,10 +13,26 @@ from collections import deque
 
 from phone_agent.actions import ActionHandler
 from phone_agent.actions.handler import finish, parse_action
-from phone_agent.config import get_messages, SYSTEM_PROMPT
 from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.model.client import MessageBuilder
+
+
+def _ui_messages(lang: str = "cn") -> dict[str, str]:
+    # Leak-only workflows shouldn't require the full phone_agent.config.* stack.
+    if (lang or "").lower().startswith("en"):
+        return {
+            "thinking": "Thinking",
+            "action": "Action",
+            "task_completed": "Task Completed",
+            "done": "Done",
+        }
+    return {
+        "thinking": "思考过程",
+        "action": "执行动作",
+        "task_completed": "任务完成",
+        "done": "完成",
+    }
 
 
 @dataclass
@@ -34,7 +50,12 @@ class AgentConfig:
 
     def __post_init__(self):
         if self.system_prompt is None:
-            self.system_prompt = SYSTEM_PROMPT
+            # Leak mode sets system_prompt explicitly in main.py; keep a minimal fallback here.
+            self.system_prompt = (
+                "You are a HarmonyOS UI automation agent.\n"
+                "Strictly output:\n<think>{think}</think>\n<answer>{action}</answer>\n"
+                "Allowed actions: do(...) or finish(...).\n"
+            )
 
 
 @dataclass
@@ -383,7 +404,7 @@ class PhoneAgent:
 
         # Get model response
         try:
-            msgs = get_messages(self.agent_config.lang)
+            msgs = _ui_messages(self.agent_config.lang)
             print("\n" + "=" * 50)
             print(f"{msgs['thinking']}:")
             print("-" * 50)
@@ -477,7 +498,7 @@ class PhoneAgent:
         finished = action.get("_metadata") == "finish" or result.should_finish
 
         if finished and self.agent_config.verbose:
-            msgs = get_messages(self.agent_config.lang)
+            msgs = _ui_messages(self.agent_config.lang)
             print("\n" + "=" * 50)
             print(
                 f"{msgs['task_completed']}: {result.message or action.get('message', msgs['done'])}"

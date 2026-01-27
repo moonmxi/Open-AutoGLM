@@ -8,9 +8,6 @@ from typing import Any
 from openai import OpenAI
 import sys
 
-from phone_agent.config.i18n import get_message
-
-
 @dataclass
 class ModelConfig:
     """Configuration for the AI model."""
