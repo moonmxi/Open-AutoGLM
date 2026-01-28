@@ -16,6 +16,7 @@ from phone_agent.actions.handler import finish, parse_action
 from phone_agent.device_factory import get_device_factory
 from phone_agent.model import ModelClient, ModelConfig
 from phone_agent.model.client import MessageBuilder
+from phone_agent.workflow.prompt_rules import ACTION_FORMAT_RETRY_CONTENT
 
 
 def _ui_messages(lang: str = "cn") -> dict[str, str]:
@@ -47,6 +48,7 @@ class AgentConfig:
     screen_info_hook: Callable[[str, str], dict[str, Any]] | None = None
     same_screen_threshold: float = 0.98
     max_same_screen_steps: int = 10
+    debug_prompt: bool = True
 
     def __post_init__(self):
         if self.system_prompt is None:
@@ -300,32 +302,17 @@ class PhoneAgent:
             try:
                 extra_screen_info = self.agent_config.screen_info_hook(
                     current_app, screenshot.base64_data
-                )
+                ) or {}
             except Exception:
                 extra_screen_info = {}
 
         # Track leak-mode阶段，指导模型先对齐场景再复现动作。
         leak_mode_flag = bool(extra_screen_info.get("leak_mode"))
-        if leak_mode_flag and self._leak_phase is None:
-            self._leak_phase = "scene_nav"
         if leak_mode_flag:
-            score = extra_screen_info.get("pre_leak_match_score")
-            if (
-                self._leak_phase == "scene_nav"
-                and isinstance(score, (int, float))
-                and score >= 0.9
-            ):
-                self._leak_phase = "replay_ready"
-
-            phase_hint = (
-                "阶段1：先用参考截图对齐到 pre_leak，再去复现动作序列"
-                if self._leak_phase == "scene_nav"
-                else "阶段2：已对齐目标界面，可按动作窗口复现并拼接可重复 steps（准备 <LEAK_SEQUENCE_READY>）"
-            )
+            # 移除所有推测性的分数和阶段提示，只保留最基础的状态标记
             extra_screen_info = {
-                **extra_screen_info,
-                "leak_phase": self._leak_phase,
-                "leak_phase_hint": phase_hint,
+                "leak_mode": True,
+                "target_app": extra_screen_info.get("target_app"),
             }
 
         if self._last_action_result is not None:
@@ -349,14 +336,11 @@ class PhoneAgent:
                 "last_action_message": self._last_action_result.get("message"),
             }
 
+        # 仅保留物理事实和状态，移除推测性分数
         extra_screen_info = {
             **extra_screen_info,
-            "screen_similarity_to_prev": screen_similarity_to_prev,
             "same_screen_streak": self._same_screen_streak,
             "screenshot_is_sensitive": getattr(screenshot, "is_sensitive", False),
-            "screenshot_mean_luma": getattr(screenshot, "mean_luma", None),
-            "screenshot_std_luma": getattr(screenshot, "std_luma", None),
-            "screenshot_hash": current_hash,
         }
         if self._same_screen_streak >= 3:
             extra_screen_info["progress_hint"] = "Same screen repeated; change strategy (reset/back/home/launch or try different path)."
@@ -402,6 +386,52 @@ class PhoneAgent:
 
         self._context.append(MessageBuilder.create_user_message_from_parts(parts))
 
+        if self.agent_config.debug_prompt:
+            print("\n" + "=" * 50)
+            print("【DEBUG PROMPT START】")
+            print("-" * 30)
+            
+            # 策略：
+            # 1. 总是打印 System Prompt (Index 0)
+            # 2. 如果是第一轮对话（is_first），打印 Initial User Prompt (Index 1)
+            # 3. 总是打印 Last Message (最新的一条)
+            
+            indices_to_print = {0, len(self._context) - 1}
+            if is_first and len(self._context) > 1:
+                indices_to_print.add(1)
+            
+            # 按顺序打印选中的消息
+            for idx in sorted(indices_to_print):
+                msg = self._context[idx]
+                role = msg["role"].upper()
+                print(f"[{role} MESSAGE (#{idx})]:")
+                
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    for i, part in enumerate(content):
+                        p_type = part.get("type", "unknown")
+                        if p_type == "text":
+                            text_preview = part.get("text", "")
+                            indented_text = "\n    ".join(text_preview.splitlines())
+                            print(f"  Part {i} [Text]:\n    {indented_text}")
+                        elif p_type == "image_url":
+                            url = part.get("image_url", {}).get("url", "")
+                            if url.startswith("data:"):
+                                meta, _ = url.split(",", 1) if "," in url else (url, "")
+                                print(f"  Part {i} [Image]: {meta},... (len={len(url)})")
+                            else:
+                                print(f"  Part {i} [Image]: {url}")
+                else:
+                    print(f"  [Content]: {content}")
+                print("-" * 30)
+
+            if len(self._context) > 3 and not is_first:
+                 print(f"... (Skipped {len(self._context) - 3} intermediate messages) ...")
+                 print("-" * 30)
+
+            print("【DEBUG PROMPT END】")
+            print("=" * 50 + "\n")
+
         # Get model response
         try:
             msgs = _ui_messages(self.agent_config.lang)
@@ -435,9 +465,27 @@ class PhoneAgent:
             if fallback_parsed:
                 action = fallback_parsed
             else:
-                if self.agent_config.verbose:
-                    traceback.print_exc()
-                action = finish(message=str(e))
+                retry_parsed = None
+                retry_response = None
+                try:
+                    self._context.append(MessageBuilder.create_user_message(ACTION_FORMAT_RETRY_CONTENT))
+                    retry_response = self.model_client.request(self._context)
+                    try:
+                        retry_parsed = parse_action(retry_response.action)
+                    except Exception:
+                        raw_retry = getattr(retry_response, "raw_content", None)
+                        if raw_retry:
+                            retry_parsed = parse_action(raw_retry)
+                except Exception:
+                    retry_parsed = None
+
+                if retry_parsed and retry_response is not None:
+                    response = retry_response
+                    action = retry_parsed
+                else:
+                    if self.agent_config.verbose:
+                        traceback.print_exc()
+                    action = finish(message=str(e))
 
         action_signature = json.dumps(action, sort_keys=True, ensure_ascii=False)
         if action_signature == self._last_action_signature:

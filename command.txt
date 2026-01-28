@@ -1,1 +1,1 @@
-python main.py --base-url https://open.bigmodel.cn/api/paas/v4 --model glm-4.6v --apikey bb309d572bc349b5aceddc22ea2b8ae0.Zo5RsRuZkVG4bAxe --leak-ts-ms 1769046444001
+python main.py --base-url https://open.bigmodel.cn/api/paas/v4 --model glm-4.6v --apikey bb309d572bc349b5aceddc22ea2b8ae0.Zo5RsRuZkVG4bAxe --leak-ts-ms 1769046444001 --debug-prompt

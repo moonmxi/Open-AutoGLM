@@ -331,7 +331,8 @@ Examples:
     parser.add_argument("--pre-window-s", type=int, default=30)
     parser.add_argument("--post-window-s", type=int, default=10)
     parser.add_argument("--max-actions", type=int, default=6)
-    parser.add_argument("--max-screenshots", type=int, default=2)
+    # 默认给 3-4 张截图的空间，便于对齐 leak_ts 前的多张参考图
+    parser.add_argument("--max-screenshots", type=int, default=4)
     parser.add_argument("--suspect-k", type=int, default=3)
 
     parser.add_argument(
@@ -339,6 +340,12 @@ Examples:
         nargs="?",
         type=str,
         help="Task to execute (interactive mode if not provided)",
+    )
+    
+    parser.add_argument(
+        "--debug-prompt",
+        action="store_true",
+        help="Print system and user prompts for debugging",
     )
 
     return parser.parse_args()
@@ -466,6 +473,7 @@ def main():
         device_id=resolved_device_id,
         verbose=not args.quiet,
         lang="cn",
+        debug_prompt=args.debug_prompt,
     )
 
     agent = PhoneAgent(
@@ -499,7 +507,7 @@ def main():
             BuildOptions,
             build_leak_case_from_devecotesting,
         )
-        from phone_agent.workflow.leak_system_prompt import LEAK_SYSTEM_PROMPT
+        from phone_agent.workflow.leak_system_prompt import build_leak_system_prompt
         from phone_agent.workflow.prompt_builder import (
             build_leak_case_extra_messages,
             build_leak_case_task_hint,
@@ -524,13 +532,10 @@ def main():
         task_hint = build_leak_case_task_hint(case)
 
         # Leak-mode: use a shorter system prompt and reduce completion token budget.
-        if case.target_app_name or case.target_bundle_name:
-            agent.agent_config.system_prompt = (
-                LEAK_SYSTEM_PROMPT
-                + f"\n目标APP（来自 DevEcoTesting layout）: {case.target_app_name or '未知'} / {case.target_bundle_name or ''}\n"
-            )
-        else:
-            agent.agent_config.system_prompt = LEAK_SYSTEM_PROMPT
+        agent.agent_config.system_prompt = build_leak_system_prompt(
+            target_app_name=case.target_app_name,
+            target_bundle_name=case.target_bundle_name,
+        )
         agent.model_config.max_tokens = min(agent.model_config.max_tokens, 1200)
         agent.agent_config.max_same_screen_steps = min(agent.agent_config.max_same_screen_steps, 8)
 
@@ -542,39 +547,18 @@ def main():
         print(f"Screenshots: {len(case.screenshots)}\n")
 
         # Provide numeric screen match scores to help the model stay anchored:
-        # - pre_leak: target scene alignment
+        # - micro_frame_matches: match across micro-flow frames (equal weight)
         # - action_before_matches: infer which recorded action-state the current screen resembles
-        pre_ref = case.key_screenshots.get("pre_leak")
-        if pre_ref is not None:
+        pre_refs = [s for s in case.screenshots if s.ts_ms <= case.leak_ts_ms]
+        post_refs = [s for s in case.screenshots if s.ts_ms > case.leak_ts_ms]
+        micro_refs = pre_refs[-3:] if len(pre_refs) >= 3 else pre_refs + post_refs[: max(0, 3 - len(pre_refs))]
+        micro_refs = sorted({r.ts_ms: r for r in micro_refs}.values(), key=lambda r: r.ts_ms)
+        if micro_refs:
             def _hook(current_app: str, screen_base64: str):
-                try:
-                    score = similarity_file_vs_base64_jpeg(pre_ref.path, screen_base64)
-                except Exception:
-                    score = None
                 # Compare current screen to per-action "before" snapshots (top-k only to control token size).
-                action_matches: list[dict[str, object]] = []
-                try:
-                    scored: list[tuple[float, int, str, int]] = []
-                    for idx, a in enumerate(case.actions):
-                        ref = getattr(a, "before_shot", None)
-                        if ref is None or not getattr(ref, "path", None):
-                            continue
-                        try:
-                            s = similarity_file_vs_base64_jpeg(ref.path, screen_base64)
-                        except Exception:
-                            continue
-                        scored.append((float(s), idx, str(getattr(a, "action_type", "")), int(getattr(a, "ts_ms", 0))))
-                    scored.sort(key=lambda x: x[0], reverse=True)
-                    for s, idx, typ, ts in scored[:3]:
-                        action_matches.append({"idx": idx, "ts_ms": ts, "type": typ, "score": round(s, 4)})
-                except Exception:
-                    action_matches = []
                 return {
                     "leak_mode": True,
                     "target_app": case.target_app_name,
-                    "pre_leak_ts_ms": pre_ref.ts_ms,
-                    "pre_leak_match_score": score,
-                    "best_action_before_matches": action_matches,
                 }
 
             agent.agent_config.screen_info_hook = _hook
@@ -584,6 +568,14 @@ def main():
 
         seq = extract_repro_sequence_from_finish_message(result)
         if seq is not None:
+            # Auto-fill identifiers if the model used placeholders.
+            if not isinstance(seq, dict):
+                seq = {"steps": seq} if seq else {"steps": []}
+            if not seq.get("case_id"):
+                seq["case_id"] = case.case_id
+            leak_val = seq.get("leak_ts_ms")
+            if not isinstance(leak_val, int) or leak_val <= 0:
+                seq["leak_ts_ms"] = case.leak_ts_ms
             print("\nDetected <LEAK_SEQUENCE_READY> with JSON payload.")
             repeat_env = os.getenv("PHONE_AGENT_REPLAY_COUNT", "10")
             try:

@@ -9,6 +9,49 @@ from typing import Any
 from .case_types import LeakCase, ScreenshotRef
 
 
+# ==== Static prompt blocks (collected in one place) ====
+TASK_HINT_TEMPLATE = (
+    "任务简述：\n"
+    "1) 场景对齐：利用提供的“动作截图”在设备上定位到起始场景。\n"
+    "2) 动作复现：严格按顺序执行提供的微流程动作（3步），每一步都必须确保在对应的 Before 截图场景中执行。\n"
+    "3) 自检闭环：执行完序列后，确认是否回到了起始场景（便于循环），确认无误后 finish。\n"
+)
+
+HEADER_TEMPLATE = (
+    "【Leak Case Data】\n"
+    "{target_lines}"
+    "\n"
+    "本任务提供一组导致泄漏的用户行为序列（微流程）。\n"
+    "你需要根据 System Prompt 中的【核心心智模型】和【执行检查表】，在真机上复现此流程。\n"
+)
+
+# Removed redundant rule texts (SCREEN_POLICY, ACTION_PROTOCOL, ANCHOR_RULES, TIMELINE_FOCUS)
+# because they are already defined in the System Prompt.
+
+REPLAY_HINTS_HEADER = "【Replay Sequence】需复现的微流程动作序列（按时间顺序）：\n"
+
+SCREENSHOTS_HEADER = "【Reference Screenshots】动作前后的关键参考图："
+SCREENSHOTS_HINT = "提示：请利用上述截图定位元素和确认状态变化。"
+
+ACTION_FRAME_FLOW_GUIDE = (
+    "执行注意：\n"
+    "- 严格按顺序复现，不要跳步。\n"
+    "- 每一步操作前，必须对比当前屏幕与该步骤的 Before 截图，确认场景一致。\n"
+    "- 若场景不一致，先进行导航操作（可能多步）直至对齐。\n"
+    "- 每一步操作后，必须对比当前屏幕与该步骤的 After 截图，确认结果一致后再进行下一步。"
+)
+
+OUTPUT_CONTRACT_TEMPLATE = (
+    "【Output Contract】\n"
+    "复现成功后，使用 finish(message=...) 提交结果。\n"
+    "message 必须包含：\n"
+    "1) Token: <LEAK_SEQUENCE_READY>\n"
+    "2) JSON 数据块：```json {{ ... }} ```，包含 case_id, leak_ts_ms, steps。\n"
+    "   - steps 必须是结构化的动作列表（Tap/Swipe/Type/Back/Home/Wait），坐标为 0-999 相对坐标。\n"
+    "   - 序列必须是闭环的（执行后回到起始场景）。\n"
+    "JSON 示例：\n```json\n{schema_json}\n```\n"
+)
+
 def _text_part(text: str) -> dict[str, Any]:
     return {"type": "text", "text": text}
 
@@ -57,223 +100,122 @@ def _image_to_data_url(
     return f"data:{mime};base64,{encoded}"
 
 
+def _select_micro_actions(case: LeakCase, count: int = 3):
+    if not case.actions:
+        return []
+    anchor = case.anchor_action_window_index
+    if anchor is None:
+        return case.actions[: max(0, min(count, len(case.actions)))]
+    end = min(anchor + 1, len(case.actions))
+    start = max(0, end - count)
+    return case.actions[start:end]
+
+
 def build_leak_case_task_hint(case: LeakCase) -> str:
     app_line = ""
     if case.target_app_name or case.target_bundle_name:
         app_line = f"目标 APP 参考：{case.target_app_name or '未知'}（{case.target_bundle_name or ''}）\n"
     return (
         app_line
-        + "三阶段要求：\n"
-        + "1) 用实时截图对齐到 pre_leak 目标界面（参考目标前两张截图+pre_leak，必要时 Home->Launch）。\n"
-        + "2) 在目标界面内按 Actions Window / Replay Hints 复现压力动作（首轮），完成后先回到首轮开始的场景。\n"
-        + "3) 自测：按自己构造的同一序列再执行一轮，确认无误后，用 <LEAK_SEQUENCE_READY> + ```json``` finish；JSON 至少含 case_id / leak_ts_ms / steps，steps 不含 Launch，执行完必须回到序列开始场景。\n"
+        + TASK_HINT_TEMPLATE
     )
-
-
-def _format_actions_window(case: LeakCase) -> str:
-    lines: list[str] = []
-    total = len(case.actions)
-    lines.append("【Actions Window】已按时间排序；至少覆盖 MUST_REPLAY 的两步，再组合可重复动作序列")
-    if not case.actions:
-        lines.append("- (empty)")
-        return "\n".join(lines)
-
-    anchor = case.anchor_action_window_index
-    indices: set[int] = set(case.suspect_action_window_indices)
-    if anchor is not None:
-        indices.update({anchor, max(0, anchor - 1), min(total - 1, anchor + 1)})
-    if not indices:
-        indices = set(range(min(6, total)))
-
-    shown = sorted(indices)
-    lines.append(f"- showing {len(shown)} / {total}，至少包含 MUST_REPLAY 的两步，再组合可重复动作序列")
-
-    must_replay_indices: set[int] = set()
-    pre_actions = [i for i, a in enumerate(case.actions) if a.ts_ms <= case.leak_ts_ms]
-    if pre_actions:
-        last_two = pre_actions[-2:] if len(pre_actions) >= 2 else pre_actions[-1:]
-        must_replay_indices.update(last_two)
-
-    for i in shown:
-        a = case.actions[i]
-        delta_ms = case.leak_ts_ms - a.ts_ms
-        marks: list[str] = []
-        if anchor == i:
-            marks.append("ANCHOR")
-        if i in set(case.suspect_action_window_indices):
-            marks.append("SUSPECT")
-        if i in must_replay_indices:
-            marks.append("MUST_REPLAY")
-        mark = f" [{'|'.join(marks)}]" if marks else ""
-
-        xpath_tail = "/".join([seg for seg in a.xpath.split("/") if seg][-4:]) if a.xpath else ""
-        if len(xpath_tail) > 160:
-            xpath_tail = "..." + xpath_tail[-160:]
-        scene = a.exact_scene_id[:8] if a.exact_scene_id else ""
-        scene_part = f" scene={scene}" if scene else ""
-        snap_part = ""
-        if a.before_shot or a.after_shot:
-            before_name = a.before_shot.path.name if a.before_shot else ""
-            after_name = a.after_shot.path.name if a.after_shot else ""
-            snap_part = f" shots(before={before_name or '-'}, after={after_name or '-'})"
-        sugg = f" suggested_element={a.suggested_element}" if a.suggested_element else ""
-
-        lines.append(
-            f"- #{i}{mark} ts={a.ts_ms} (delta_ms={delta_ms}) type={a.action_type}{scene_part}{sugg} xpath_tail={xpath_tail}{snap_part}"
-        )
-    return "\n".join(lines)
-
-
-def _format_replay_hints(case: LeakCase) -> str:
-    if not case.actions:
-        return "【Replay Hints】无可参考动作"
-    before = [a for a in case.actions if a.ts_ms <= case.leak_ts_ms]
-    after = [a for a in case.actions if a.ts_ms > case.leak_ts_ms]
-    selected = before[-3:] + after[:2]
-
-    def fmt_action(a: Any) -> str:
-        scene = a.exact_scene_id[:8] if a.exact_scene_id else ""
-        scene_part = f" scene={scene}" if scene else ""
-        xpath_tail = "/".join([seg for seg in a.xpath.split("/") if seg][-4:]) if a.xpath else ""
-        if len(xpath_tail) > 120:
-            xpath_tail = "..." + xpath_tail[-120:]
-        return f"- ts={a.ts_ms} type={a.action_type}{scene_part} xpath_tail={xpath_tail}"
-
-    return "【Replay Hints】列出漏点前3步 + 后2步，复现时优先覆盖前三步\n" + "\n".join(fmt_action(a) for a in selected)
 
 
 def _format_screenshots(case: LeakCase) -> str:
     lines: list[str] = []
-    lines.append("【Screenshots Window】窗口内截图，文件名为时间戳；包含 pre/post 及少量关键参考图（控制 token）")
+    lines.append(SCREENSHOTS_HEADER)
     if not case.screenshots:
         lines.append("- (empty)")
         return "\n".join(lines)
-    for s in case.screenshots:
-        delta_ms = s.ts_ms - case.leak_ts_ms
-        lines.append(f"- {s.label}: ts={s.ts_ms} (delta_ms={delta_ms}) file={s.path.name}")
+    lines.append(SCREENSHOTS_HINT)
     return "\n".join(lines)
 
 
 def _format_output_contract(case: LeakCase) -> str:
     schema_hint = {
-        "case_id": case.case_id,
-        "leak_ts_ms": case.leak_ts_ms,
+        "case_id": "AUTO_FILL",
+        "leak_ts_ms": 0,
         "steps": [
-            {"action": "Tap", "element": [123, 456]},
-            {"action": "Swipe", "start": [500, 800], "end": [500, 200]},
+            {"action": "Tap", "element": ["x(0-999)", "y(0-999)"]},
+            {"action": "Swipe", "start": ["x1", "y1"], "end": ["x2", "y2"]},
             {"action": "Back"},
         ],
     }
-    return (
-        "【Output Contract】\n"
-        "当你认为已复现且可回放时，请使用 finish(message=...) 收口，并满足：\n"
-        "1) 必须用单引号包裹 message：finish(message='...')（防止 JSON 被截断）\n"
-        '2) message 必须包含 token: "<LEAK_SEQUENCE_READY>"\n'
-        "3) message 必须包含一段 ```json ... ```，字段至少有 case_id / leak_ts_ms / steps\n"
-        "4) steps 为结构化动作列表（不要放 do(...) 字符串），字段与 ActionHandler 一致（Tap/Swipe/Type/Back/Home/Wait 等，不要包含 Launch），坐标使用 0-999 相对坐标系；执行完 steps 后应回到执行 steps 前的场景，便于可重复回放\n"
-        f"JSON 示例：\n```json\n{json.dumps(schema_hint, ensure_ascii=False, indent=2)}\n```\n"
+    return OUTPUT_CONTRACT_TEMPLATE.format(
+        schema_json=json.dumps(schema_hint, ensure_ascii=False, indent=2)
     )
 
 
-def build_leak_case_text(case: LeakCase) -> str:
-    header = (
-        f"【Leak Case】case_id={case.case_id}\n"
-        f"- T_leak(ms)={case.leak_ts_ms}\n"
-        f"- window=[{case.window_start_ms}, {case.window_end_ms}] (pre={case.pre_window_s}s, post={case.post_window_s}s)\n"
-        f"- suspects_k={case.suspect_k}, max_actions={case.max_actions}, max_screenshots={case.max_screenshots}\n"
-        + (
+def _format_header(case: LeakCase) -> str:
+    target_lines = ""
+    if case.target_app_name or case.target_bundle_name:
+        target_lines = (
             f"- target_app_name={case.target_app_name}\n"
             f"- target_bundle_name={case.target_bundle_name}\n"
             f"- target_ability_name={case.target_ability_name}\n"
             f"- target_page_path={case.target_page_path}\n"
-            if (case.target_app_name or case.target_bundle_name)
-            else ""
         )
-        + "\n"
-        "任务：结合“动作窗口”和“关键截图”，在设备上找到对应场景并复现导致泄漏的操作路径。\n"
-        "要求：\n"
-        "1) 把 pre_leak 截图当作目标界面，优先导航到与之匹配的场景；\n"
-        "2) 继续覆盖 SUSPECT/ANCHOR 动作，避免与泄漏无关的探索；\n"
-        "3) 序列必须闭环可重复：推荐 Home->Launch 起步并进入目标场景后再复现；若中途偏航先 Back/Home 归位，不要把误点/探索动作写入 steps；steps 不含 Launch；执行完 steps 后应回到执行 steps 前的场景（不含 Launch），便于循环压力测试；\n"
-        "4) 最终对齐到与 post_leak 相近的界面；\n"
-        "5) 只做场景对齐与路径复现，不要尝试读取内存/接口/设置。\n"
+    return HEADER_TEMPLATE.format(
+        target_lines=target_lines,
     )
-
-    hints: list[str] = []
-    if case.pre_leak_text_hints:
-        hints.append("【pre_leak UI 文本线索】" + " / ".join(case.pre_leak_text_hints[:16]))
-    if case.post_leak_text_hints:
-        hints.append("【post_leak UI 文本线索】" + " / ".join(case.post_leak_text_hints[:16]))
-
-    parts = [
-        header,
-        "\n".join(hints).strip(),
-        _format_actions_window(case),
-        "",
-        _format_replay_hints(case),
-        "",
-        _format_screenshots(case),
-        "",
-        _format_output_contract(case),
-    ]
-    return "\n".join([p for p in parts if p]).strip() + "\n"
-
 
 def build_leak_case_extra_messages(case: LeakCase) -> list[dict[str, Any]]:
     parts: list[dict[str, Any]] = []
-    parts.append(_text_part(build_leak_case_text(case)))
+    
+    # 1. Header
+    parts.append(_text_part(_format_header(case)))
+    
+    # 2. Interleaved Micro-flow (Text + Images)
+    actions = _select_micro_actions(case, count=3)
+    if actions:
+        parts.append(_text_part("【Micro-flow Actions】请严格按顺序复现以下 3 步操作：\n"))
+        
+        for i, act in enumerate(actions, start=1):
+            # 2.1 Action Description
+            target_desc = ""
+            if act.xpath:
+                xpath_tail = "/".join([seg for seg in act.xpath.split("/") if seg][-4:])
+                if len(xpath_tail) > 80:
+                    xpath_tail = "..." + xpath_tail[-80:]
+                target_desc = f"xpath: {xpath_tail}"
+            
+            extras = []
+            if act.suggested_element:
+                extras.append(f"suggested_coords={act.suggested_element}")
+            extra_str = f" ({', '.join(extras)})" if extras else ""
 
-    pre = [s for s in case.screenshots if s.ts_ms <= case.leak_ts_ms]
-    post = [s for s in case.screenshots if s.ts_ms >= case.leak_ts_ms]
+            # Prepare image info for text to reduce parts count
+            ref_info_list = []
+            images_to_append = []
+            
+            for tag, ref in (("Before", act.before_shot), ("After", act.after_shot)):
+                if ref and ref.path.exists():
+                    # Just use filename as requested by user
+                    ref_info_list.append(f"{tag}: {ref.path.name}")
+                    images_to_append.append(ref.path)
+                else:
+                    ref_info_list.append(f"{tag}: Missing")
+            
+            ref_str = ", ".join(ref_info_list)
 
-    selected: list[ScreenshotRef] = []
-    if pre:
-        selected.extend(pre[-3:])
-    if post:
-        selected.append(post[0])
+            step_text = (
+                f"Step {i}: {act.action_type}\n"
+                f"  - Target: {target_desc}{extra_str}\n"
+                f"  - Reference: {ref_str}"
+            )
+            parts.append(_text_part(step_text))
 
-    pre_key = case.key_screenshots.get("pre_leak")
-    post_key = case.key_screenshots.get("post_leak")
+            # 2.2 Snapshots (Images only, no extra text parts)
+            for img_path in images_to_append:
+                parts.append(_image_part_from_data_url(
+                    _image_to_data_url(img_path, max_side=360, jpeg_quality=38)
+                ))
+            
+        parts.append(_text_part(ACTION_FRAME_FLOW_GUIDE))
+    else:
+        parts.append(_text_part("【Micro-flow Actions】(No actions available)"))
 
-    seen_ts: set[int] = set()
-    for ref in selected:
-        if ref.ts_ms in seen_ts:
-            continue
-        seen_ts.add(ref.ts_ms)
-
-        label = ref.label
-        if pre_key and ref.ts_ms == pre_key.ts_ms:
-            label = "pre_leak"
-        if post_key and ref.ts_ms == post_key.ts_ms:
-            label = "post_leak"
-        parts.append(_text_part(f"【Reference screenshot】label={label} ts={ref.ts_ms} file={ref.path.name}（按时间顺序导航，优先用于阶段1 场景对齐）"))
-        parts.append(_image_part_from_data_url(_image_to_data_url(ref.path, max_side=384, jpeg_quality=40)))
-
-    # Attach action-specific before/after snapshots for anchor/suspect actions
-    candidate_indices: list[int] = []
-    if case.anchor_action_window_index is not None:
-        candidate_indices.append(case.anchor_action_window_index)
-    candidate_indices.extend(case.suspect_action_window_indices)
-    # Always include MUST_REPLAY (the last two actions at/before leak_ts_ms) so the model
-    # can see before/after snapshots of the most critical recorded steps.
-    pre_actions = [i for i, a in enumerate(case.actions) if a.ts_ms <= case.leak_ts_ms]
-    if pre_actions:
-        candidate_indices.extend(pre_actions[-2:] if len(pre_actions) >= 2 else pre_actions[-1:])
-    candidate_indices = sorted({i for i in candidate_indices if 0 <= i < len(case.actions)})[:4]
-
-    max_images = 6
-    images_used = 0
-    for idx in candidate_indices:
-        if images_used >= max_images:
-            break
-        a = case.actions[idx]
-        for tag, ref in (("before", a.before_shot), ("after", a.after_shot)):
-            if ref is None or not ref.path.exists():
-                continue
-            parts.append(_text_part(f"【Action snapshot】idx={idx} ts={a.ts_ms} tag={tag} file={ref.path.name}（帮助推断CLICK目标前后变化）"))
-            parts.append(_image_part_from_data_url(_image_to_data_url(ref.path, max_side=360, jpeg_quality=38)))
-            images_used += 1
-            if images_used >= max_images:
-                break
+    # 3. Output Contract
+    parts.append(_text_part(_format_output_contract(case)))
 
     return [_create_user_message_from_parts(parts)]

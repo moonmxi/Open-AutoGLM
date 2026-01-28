@@ -37,6 +37,7 @@ class ScreenshotRef:
     path: Path
     label: str
     layout_path: Path | None = None
+    page_label: str | None = None  # Inferred page name from layout
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -67,8 +68,6 @@ class LeakCase:
     target_app_name: str | None = None
     target_ability_name: str | None = None
     target_page_path: str | None = None
-    pre_leak_text_hints: list[str] = field(default_factory=list)
-    post_leak_text_hints: list[str] = field(default_factory=list)
 
     actions: list[DevEcoAction] = field(default_factory=list)
     anchor_action_window_index: int | None = None
@@ -96,8 +95,6 @@ class LeakCase:
             "target_app_name": self.target_app_name,
             "target_ability_name": self.target_ability_name,
             "target_page_path": self.target_page_path,
-            "pre_leak_text_hints": list(self.pre_leak_text_hints),
-            "post_leak_text_hints": list(self.post_leak_text_hints),
             "actions": [a.to_dict() for a in self.actions],
             "anchor_action_window_index": self.anchor_action_window_index,
             "suspect_action_window_indices": list(self.suspect_action_window_indices),

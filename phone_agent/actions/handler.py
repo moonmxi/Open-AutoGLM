@@ -322,6 +322,41 @@ def parse_action(response: str) -> dict[str, Any]:
         if not content:
             raise ValueError("empty action text")
 
+        def _extract_call(src: str, start: int) -> str:
+            i = start
+            in_str = False
+            quote = ""
+            escape = False
+            depth = 0
+            while i < len(src) and src[i] != "(":
+                i += 1
+            if i >= len(src) or src[i] != "(":
+                return src[start:].strip()
+            depth = 1
+            i += 1
+            while i < len(src):
+                ch = src[i]
+                if escape:
+                    escape = False
+                elif in_str:
+                    if ch == "\\":
+                        escape = True
+                    elif ch == quote:
+                        in_str = False
+                        quote = ""
+                else:
+                    if ch in ("'", '"'):
+                        in_str = True
+                        quote = ch
+                    elif ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                        if depth == 0:
+                            return src[start : i + 1].strip()
+                i += 1
+            return src[start:].strip()
+
         # Extract the last <answer>...</answer> block if present
         if "<answer>" in content and "</answer>" in content:
             matches = re.findall(r"<answer>(.*?)</answer>", content, flags=re.S)
@@ -331,19 +366,12 @@ def parse_action(response: str) -> dict[str, Any]:
         # Trim to the last actionable marker to drop <think>/其他文本
         marker_idx = max(content.rfind("finish("), content.rfind("do("))
         if marker_idx != -1:
-            content = content[marker_idx:].strip()
+            content = _extract_call(content, marker_idx)
 
         # Strip repeated leading/trailing XML tags (e.g., <answer><answer> ... </answer></answer>)
         content = re.sub(r"^(<answer>\s*)+", "", content, flags=re.I)
         content = re.sub(r"(</[a-zA-Z]+>\s*)+$", "", content)
         content = content.strip()
-
-        # If there's trailing text after the first closing ')', trim it to keep AST parsing clean.
-        if content.startswith(("do(", "finish(")):
-            closing_idx = content.find(")")
-            if closing_idx != -1:
-                content = content[: closing_idx + 1]
-            content = content.strip()
 
         if content.startswith('do(action="Type"') or content.startswith(
             'do(action="Type_Name"'

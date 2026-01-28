@@ -288,14 +288,17 @@ def _suggest_element_from_xpath(layout_path: Path, xpath: str) -> tuple[list[int
     target = _find_node_by_xpath(layout, xpath)
     if not target:
         # Fuzzy fallback: try to find a node whose type-path best matches the xpath suffix.
-        segs = [name for name, _ in _xpath_segments(xpath) if name and name != "__Common__"]
-        if not segs:
+        xpath_parts = [(name, idx) for name, idx in _xpath_segments(xpath) if name and name != "__Common__"]
+        if not xpath_parts:
             return None
 
-        desired = segs
+        desired = [p[0] for p in xpath_parts]
+        desired_last_idx = xpath_parts[-1][1] if xpath_parts else None
+
         best: dict[str, Any] | None = None
         best_score = -1
         best_area = -1
+        best_parent: dict[str, Any] | None = None
 
         root_bounds = _parse_bounds(str((layout.get("attributes") or {}).get("bounds") or ""))
         root_area = None
@@ -317,8 +320,8 @@ def _suggest_element_from_xpath(layout_path: Path, xpath: str) -> tuple[list[int
             ch = node.get("children")
             return ch if isinstance(ch, list) else []
 
-        def walk(node: Any, path: list[str]) -> None:
-            nonlocal best, best_score, best_area
+        def walk(node: Any, path: list[str], parent: Any = None) -> None:
+            nonlocal best, best_score, best_area, best_parent
             t = node_type(node)
             if t:
                 path = path + [t]
@@ -343,11 +346,22 @@ def _suggest_element_from_xpath(layout_path: Path, xpath: str) -> tuple[list[int
                                     best = node
                                     best_score = score
                                     best_area = area
+                                    best_parent = parent
             for ch in children(node):
-                walk(ch, path)
+                walk(ch, path, node)
 
         walk(layout, [])
-        if best is None or best_score < 3:
+        
+        # If we have a parent and an index requirement, try to pick the correct sibling
+        if best and best_parent and desired_last_idx is not None:
+            siblings = children(best_parent)
+            best_t = node_type(best)
+            same_type_siblings = [s for s in siblings if node_type(s) == best_t]
+            if 0 <= desired_last_idx < len(same_type_siblings):
+                best = same_type_siblings[desired_last_idx]
+
+        # Lower threshold to 2 to allow "TabBar/Column" matches even if parent chain (Stack/Tabs) is missing
+        if best is None or best_score < 2:
             return None
         target = best
 
@@ -355,12 +369,71 @@ def _suggest_element_from_xpath(layout_path: Path, xpath: str) -> tuple[list[int
     if not isinstance(attrs, dict):
         return None
 
+    def node_type(node: Any) -> str | None:
+        if not isinstance(node, dict):
+            return None
+        a = node.get("attributes")
+        if isinstance(a, dict):
+            return a.get("type") or None
+        return None
+
+    def children(node: Any) -> list[Any]:
+        if not isinstance(node, dict):
+            return []
+        ch = node.get("children")
+        return ch if isinstance(ch, list) else []
+
+    override_center: tuple[int, int] | None = None
     b = _parse_bounds(str(attrs.get("bounds") or ""))
+    segs = _xpath_segments(xpath)
+    col_idx = None
+    for name, idx in reversed(segs):
+        if name == "Column" and idx is not None:
+            col_idx = idx
+            break
+    if col_idx is not None:
+        tabbar_pos = None
+        for i, (name, _) in enumerate(segs):
+            if name == "TabBar":
+                tabbar_pos = i
+        if tabbar_pos is not None:
+            prefix = "/".join(
+                [
+                    f"{name}[{idx}]" if idx is not None else name
+                    for name, idx in segs[: tabbar_pos + 1]
+                ]
+            )
+            tabbar = _find_node_by_xpath(layout, prefix)
+            tabbar_bounds = None
+            if tabbar:
+                tabbar_attrs = tabbar.get("attributes") if isinstance(tabbar, dict) else None
+                if isinstance(tabbar_attrs, dict):
+                    tabbar_bounds = _parse_bounds(str(tabbar_attrs.get("bounds") or ""))
+            if tabbar:
+                columns = [c for c in children(tabbar) if node_type(c) == "Column"]
+                if columns and 0 <= col_idx < len(columns):
+                    col_attrs = columns[col_idx].get("attributes") if isinstance(columns[col_idx], dict) else None
+                    if isinstance(col_attrs, dict):
+                        col_bounds = _parse_bounds(str(col_attrs.get("bounds") or ""))
+                        if col_bounds:
+                            b = col_bounds
+                elif tabbar_bounds:
+                    x1, y1, x2, y2 = tabbar_bounds
+                    count = len(columns) if columns else max(col_idx + 1, 5)
+                    if x2 > x1 and count > 0:
+                        cx = int(x1 + (col_idx + 0.5) * (x2 - x1) / count)
+                        cy = int((y1 + y2) / 2)
+                        override_center = (cx, cy)
+                        b = tabbar_bounds
+
     if not b:
         return None
     x1, y1, x2, y2 = b
-    cx = int((x1 + x2) / 2)
-    cy = int((y1 + y2) / 2)
+    if override_center:
+        cx, cy = override_center
+    else:
+        cx = int((x1 + x2) / 2)
+        cy = int((y1 + y2) / 2)
 
     # get root bounds for normalization
     root_bounds = _parse_bounds(str((layout.get("attributes") or {}).get("bounds") or ""))
@@ -382,8 +455,13 @@ def _suggest_element_from_xpath(layout_path: Path, xpath: str) -> tuple[list[int
 
 def _mk_ref(ts: int, path: Path, label: str, layout_dir: Path) -> ScreenshotRef:
     layout_path = layout_dir / f"{ts}.json"
+    
     return ScreenshotRef(
-        ts_ms=ts, path=path, label=label, layout_path=layout_path if layout_path.exists() else None
+        ts_ms=ts, 
+        path=path, 
+        label=label, 
+        layout_path=layout_path if layout_path.exists() else None,
+        page_label=None
     )
 
 
@@ -396,7 +474,7 @@ def _pick_screenshots_around_ts(
     if not shots:
         return [], {}
 
-    # Pre/post closest
+    # Closest before/after around the leak_ts sampling point
     pre_idx = None
     for i, (ts, _) in enumerate(shots):
         if ts <= leak_ts_ms:
@@ -414,8 +492,8 @@ def _pick_screenshots_around_ts(
     pre_ts, pre_path = shots[pre_idx]
     post_ts, post_path = shots[post_idx]
     key = {
-        "pre_leak": _mk_ref(pre_ts, pre_path, "pre_leak", layout_dir),
-        "post_leak": _mk_ref(post_ts, post_path, "post_leak", layout_dir),
+        "timeline_before": _mk_ref(pre_ts, pre_path, "timeline_before", layout_dir),
+        "timeline_after": _mk_ref(post_ts, post_path, "timeline_after", layout_dir),
     }
 
     # Extra context around pre/post
@@ -494,54 +572,6 @@ def _extract_app_info_from_layout(layout_path: Path) -> dict[str, str | None]:
 
     bundle, ability, page = walk(data)
     return {"bundleName": bundle, "abilityName": ability, "pagePath": page}
-
-
-def _extract_text_hints_from_layout(layout_path: Path, *, limit: int = 24) -> list[str]:
-    """
-    Best-effort extract visible text hints from layout to help the model match the target screen.
-    """
-    try:
-        data = json.loads(layout_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-    texts: list[str] = []
-    seen: set[str] = set()
-
-    def add(s: str | None) -> None:
-        if not s:
-            return
-        s = str(s).strip()
-        if not s:
-            return
-        if len(s) > 32:
-            return
-        if s.isdigit():
-            return
-        if s in seen:
-            return
-        seen.add(s)
-        texts.append(s)
-
-    def walk(node: Any) -> None:
-        if len(texts) >= limit:
-            return
-        if isinstance(node, dict):
-            attrs = node.get("attributes")
-            if isinstance(attrs, dict):
-                add(attrs.get("text"))
-                add(attrs.get("originalText"))
-                add(attrs.get("hint"))
-            children = node.get("children")
-            if isinstance(children, list):
-                for child in children:
-                    walk(child)
-        elif isinstance(node, list):
-            for child in node:
-                walk(child)
-
-    walk(data)
-    return texts[:limit]
 
 
 def _nearest_before_after_shots(
@@ -706,21 +736,38 @@ def build_leak_case_from_devecotesting(
     target_ability_name: str | None = None
     target_page_path: str | None = None
     target_app_name: str | None = None
-    pre_text_hints: list[str] = []
-    post_text_hints: list[str] = []
-    pre_ref = key.get("pre_leak")
-    if pre_ref and pre_ref.layout_path and pre_ref.layout_path.exists():
-        info = _extract_app_info_from_layout(pre_ref.layout_path)
+    timeline_text_hints: list[dict[str, Any]] = []
+
+    # Strategy: 
+    # Prefer extracting target info from the *start* of the action sequence (the micro-flow start),
+    # rather than the leak timestamp (which might be after the user has already left the leaking page).
+    # If no actions, fallback to leak_ts snapshot.
+    
+    layout_source_path: Path | None = None
+    
+    # 1. Try first action's suggested layout (closest layout to start)
+    if flattened:
+        first_action = flattened[0]
+        if first_action.suggested_layout_ts_ms:
+             # Find the path for this ts
+             found = _nearest_timestamped_path(layouts, first_action.suggested_layout_ts_ms)
+             if found:
+                 layout_source_path = found[1]
+
+    # 2. Fallback to timeline_before (leak_ts)
+    if not layout_source_path:
+        timeline_before_ref = key.get("timeline_before")
+        if timeline_before_ref and timeline_before_ref.layout_path and timeline_before_ref.layout_path.exists():
+            layout_source_path = timeline_before_ref.layout_path
+
+    # Extract info if we have a source
+    if layout_source_path and layout_source_path.exists():
+        info = _extract_app_info_from_layout(layout_source_path)
         target_bundle_name = info.get("bundleName")
         target_ability_name = info.get("abilityName")
         target_page_path = info.get("pagePath")
         if target_bundle_name:
             target_app_name = get_app_name(target_bundle_name)
-        pre_text_hints = _extract_text_hints_from_layout(pre_ref.layout_path, limit=24)
-
-    post_ref = key.get("post_leak")
-    if post_ref and post_ref.layout_path and post_ref.layout_path.exists():
-        post_text_hints = _extract_text_hints_from_layout(post_ref.layout_path, limit=24)
 
     case = LeakCase(
         case_id=_format_case_id(leak_ts_ms),
@@ -740,8 +787,6 @@ def build_leak_case_from_devecotesting(
         target_app_name=target_app_name,
         target_ability_name=target_ability_name,
         target_page_path=target_page_path,
-        pre_leak_text_hints=pre_text_hints,
-        post_leak_text_hints=post_text_hints,
         actions=flattened,
         anchor_action_window_index=anchor_idx,
         suspect_action_window_indices=suspects,
@@ -749,3 +794,6 @@ def build_leak_case_from_devecotesting(
         key_screenshots=key,
     )
     return case
+
+
+
